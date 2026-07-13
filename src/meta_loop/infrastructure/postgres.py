@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from meta_loop.application.models import ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
 from meta_loop.domain.enums import EventType, Role
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
 from meta_loop.domain.events import Event
@@ -54,6 +54,11 @@ class PostgresTaskRepository:
 
     def save(self, task: Task, expected_version: int) -> Task:
         return self.create(task) if task.version == 0 else self.update(task, expected_version)
+
+    def list(self) -> tuple[Task, ...]:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT task_json FROM tasks ORDER BY created_at, task_id")
+            return tuple(task_from_dict(row[0] if isinstance(row[0], dict) else json.loads(row[0])) for row in cursor.fetchall())
 
 
 class PostgresEventStore:
@@ -151,6 +156,59 @@ class PostgresTaskQueue:
         return tuple(results)
 
 
+class PostgresFuseStore:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def get(self) -> FuseState:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT engaged, changed_at, governance_revision FROM system_fuse WHERE singleton = TRUE")
+            row = cursor.fetchone()
+        return FuseState(row[0], row[1], row[2])
+
+    def set(self, state: FuseState) -> FuseState:
+        with self._connection.cursor() as cursor:
+            cursor.execute("UPDATE system_fuse SET engaged = %s, changed_at = %s, governance_revision = %s WHERE singleton = TRUE", (state.engaged, state.changed_at, state.governance_revision))
+        return state
+
+class PostgresIntakeLedger:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def get(self, request_id: str) -> IntakeRecord | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, task_id FROM intake_ledger WHERE request_id = %s", (request_id,))
+            row = cursor.fetchone()
+        return None if row is None else IntakeRecord(request_id, row[0] if isinstance(row[0], str) else _canonical(row[0]), row[1])
+
+    def create(self, record: IntakeRecord) -> IntakeRecord:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, task_id FROM intake_ledger WHERE request_id = %s FOR UPDATE", (record.request_id,))
+            row = cursor.fetchone()
+            if row is not None:
+                existing = IntakeRecord(record.request_id, row[0] if isinstance(row[0], str) else _canonical(row[0]), row[1])
+                if existing == record:
+                    return existing
+                raise IdempotencyConflictError("request id has conflicting intake")
+            cursor.execute("INSERT INTO intake_ledger (request_id, request_json, task_id) VALUES (%s, %s::jsonb, %s)", (record.request_id, record.canonical_request, record.task_id))
+        return record
+
+
+class PostgresControlEventStore:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def append(self, event: ControlEvent) -> ControlEvent:
+        with self._connection.cursor() as cursor:
+            cursor.execute("INSERT INTO control_events (action, occurred_at, governance_revision, schema_version) VALUES (%s, %s, %s, 1)", (event.action, event.occurred_at, event.governance_revision))
+        return event
+
+    def read(self) -> tuple[ControlEvent, ...]:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT action, occurred_at, governance_revision FROM control_events ORDER BY sequence")
+            return tuple(ControlEvent(row[0], row[1], row[2]) for row in cursor.fetchall())
+
+
 class PostgresUnitOfWork:
     def __init__(self, connection_factory: Callable[[], object]) -> None:
         self._connection_factory = connection_factory
@@ -162,6 +220,9 @@ class PostgresUnitOfWork:
         self.tasks = PostgresTaskRepository(self._connection)
         self.events = PostgresEventStore(self._connection)
         self.queue = PostgresTaskQueue(self._connection)
+        self.fuse = PostgresFuseStore(self._connection)
+        self.intake_ledger = PostgresIntakeLedger(self._connection)
+        self.control_events = PostgresControlEventStore(self._connection)
         self._committed = False
         return self
 

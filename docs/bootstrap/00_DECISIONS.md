@@ -49,3 +49,10 @@
 - **Consequences:** Phase 1B adapters use DB-API boundaries without importing
   a PostgreSQL driver in the domain.
 - **Status:** accepted.
+
+## ADR-004 — Local controller and fuse
+
+- **Decision:** Phase 2 uses a Python application controller and argparse CLI;
+  the local fuse is persisted in PostgreSQL with append-only control audit.
+- **Consequences:** no REST server, subprocess execution, or provider authority
+  is introduced; unauthorised release fails closed.

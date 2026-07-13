@@ -8,6 +8,9 @@ version = "0.0.0"
 description = "Independent Meta Loop bootstrap scaffold"
 requires-python = ">=3.11"
 
+[project.scripts]
+meta-loop = "meta_loop.cli.main:main"
+
 [project.optional-dependencies]
 postgres-test = ["psycopg[binary]>=3.2"]
 

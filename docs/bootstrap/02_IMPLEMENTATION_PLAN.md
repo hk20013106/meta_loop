@@ -25,6 +25,15 @@ Completion criteria
 Commands to verify
 Stop conditions
 
+## Phase 2
+
+- **Goal:** Provide a single application controller and local argparse CLI.
+- **Inputs:** Phase 1 ports/UoW, PostgreSQL adapters, and fail-closed governance.
+- **Required behavior:** atomic synthetic intake/event/enqueue, query surface,
+  persistent fuse audit, schema-v1 JSON and no credential disclosure.
+- **Tests:** controller/CLI unit tests plus disposable PostgreSQL migration gate.
+- **Non-goals:** GitHub, Hermes, execution, REST, CAS blobs, and Phase 3+.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,

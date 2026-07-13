@@ -4,7 +4,7 @@ from typing import Protocol
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
-from .models import Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from .models import ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
 
 
 class TaskRepository(Protocol):
@@ -12,6 +12,7 @@ class TaskRepository(Protocol):
     def get(self, task_id: str) -> Task | None: ...
     def update(self, task: Task, expected_version: int) -> Task: ...
     def save(self, task: Task, expected_version: int) -> Task: ...
+    def list(self) -> tuple[Task, ...]: ...
 
 
 class EventStore(Protocol):
@@ -46,10 +47,28 @@ class GovernanceReader(Protocol):
     def authorize(self, revision: str, capability: str) -> bool: ...
 
 
+class FuseStore(Protocol):
+    def get(self) -> FuseState: ...
+    def set(self, state: FuseState) -> FuseState: ...
+
+
+class IntakeLedger(Protocol):
+    def get(self, request_id: str) -> IntakeRecord | None: ...
+    def create(self, record: IntakeRecord) -> IntakeRecord: ...
+
+
+class ControlEventStore(Protocol):
+    def append(self, event: ControlEvent) -> ControlEvent: ...
+    def read(self) -> tuple[ControlEvent, ...]: ...
+
+
 class UnitOfWork(Protocol):
     tasks: TaskRepository
     events: EventStore
     queue: TaskQueue
+    fuse: FuseStore
+    intake_ledger: IntakeLedger
+    control_events: ControlEventStore
 
     def __enter__(self) -> "UnitOfWork": ...
     def commit(self) -> None: ...

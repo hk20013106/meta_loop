@@ -27,3 +27,24 @@ class QueueFailureResult:
     task_id: str
     retry_at: datetime | None
     terminal: bool
+
+
+@dataclass(frozen=True)
+class FuseState:
+    engaged: bool
+    changed_at: datetime
+    governance_revision: str | None = None
+
+
+@dataclass(frozen=True)
+class IntakeRecord:
+    request_id: str
+    canonical_request: str
+    task_id: str
+
+
+@dataclass(frozen=True)
+class ControlEvent:
+    action: str
+    occurred_at: datetime
+    governance_revision: str | None = None
