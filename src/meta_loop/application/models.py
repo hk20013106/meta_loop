@@ -169,3 +169,77 @@ class WorkerResult:
 class WorkerResultReceipt:
     result_id: str
     created: bool
+
+
+class WorkspacePurpose(str, Enum):
+    PLANNING = "planning"
+    REVIEW = "review"
+    PROPOSAL = "proposal"
+    IMPLEMENTATION = "implementation"
+
+
+class WorkspaceState(str, Enum):
+    ACTIVE = "active"
+    RELEASED = "released"
+
+
+@dataclass(frozen=True)
+class WorkspaceRequest:
+    allocation_id: str
+    task_id: str
+    role: Role
+    purpose: WorkspacePurpose
+    source_revision: str
+    expected_task_version: int
+    expected_sequence: int
+    correlation_id: str
+    governance_revision: str | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if (not self.allocation_id or not self.task_id or not self.correlation_id
+                or self.schema_version != 1 or self.expected_task_version < 0
+                or self.expected_sequence < 0):
+            raise ValidationError("workspace request identifiers and versions are invalid")
+        if self.role not in (Role.PLANNER, Role.DESIGN_REVIEWER, Role.IMPLEMENTER, Role.PATCH_REVIEWER):
+            raise ValidationError("workspace role is not supported")
+        if not isinstance(self.purpose, WorkspacePurpose):
+            raise ValidationError("workspace purpose is invalid")
+        if len(self.source_revision) < 40 or any(character not in "0123456789abcdef" for character in self.source_revision.lower()):
+            raise ValidationError("workspace source revision must be a full hexadecimal Git revision")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "allocation_id": self.allocation_id,
+            "task_id": self.task_id,
+            "role": self.role.value,
+            "purpose": self.purpose.value,
+            "source_revision": self.source_revision,
+            "expected_task_version": self.expected_task_version,
+            "expected_sequence": self.expected_sequence,
+            "correlation_id": self.correlation_id,
+            "governance_revision": self.governance_revision,
+        }
+
+    def canonical(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class WorkspaceRecord:
+    request: WorkspaceRequest
+    read_only: bool
+    repository_name: str
+    state: WorkspaceState = WorkspaceState.ACTIVE
+
+    @property
+    def workspace_id(self) -> str:
+        return self.request.allocation_id
+
+
+@dataclass(frozen=True)
+class WorkspaceReceipt:
+    allocation_id: str
+    state: WorkspaceState
+    created: bool

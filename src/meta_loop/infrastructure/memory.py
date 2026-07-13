@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -246,6 +246,35 @@ class InMemoryWorkerResultLedger:
         return self._results.get(result_id)
 
 
+class InMemoryWorkspaceLedger:
+    def __init__(self, records: dict[str, WorkspaceRecord]) -> None:
+        self._records = records
+
+    def record_once(self, record: WorkspaceRecord):
+        current = self._records.get(record.workspace_id)
+        if current is not None:
+            if current.request.canonical() != record.request.canonical():
+                raise IdempotencyConflictError("workspace allocation id has conflicting content")
+            return current, False
+        if any(value.state is WorkspaceState.ACTIVE and value.request.task_id == record.request.task_id and value.request.purpose == record.request.purpose for value in self._records.values()):
+            raise IdempotencyConflictError("task already has an active workspace for this purpose")
+        self._records[record.workspace_id] = record
+        return record, True
+
+    def get(self, allocation_id: str) -> WorkspaceRecord | None:
+        return self._records.get(allocation_id)
+
+    def release(self, allocation_id: str) -> WorkspaceRecord:
+        current = self._records.get(allocation_id)
+        if current is None:
+            raise ValidationError("workspace allocation does not exist")
+        if current.state is WorkspaceState.RELEASED:
+            return current
+        released = replace(current, state=WorkspaceState.RELEASED)
+        self._records[allocation_id] = released
+        return released
+
+
 class InMemoryUnitOfWork:
     """Copy-on-write UoW used to prove the same commit boundary as PostgreSQL."""
 
@@ -260,10 +289,11 @@ class InMemoryUnitOfWork:
         self._artifacts: dict[str, CatalogedArtifact] = {}
         self._runner_sessions: dict[str, RunnerSessionRecord] = {}
         self._worker_results: dict[str, WorkerResult] = {}
+        self._workspaces: dict[str, WorkspaceRecord] = {}
         self._committed = False
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
 
-    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult]) -> None:
+    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult], workspaces: dict[str, WorkspaceRecord]) -> None:
         self.tasks = InMemoryTaskRepository()
         self.tasks._tasks = tasks
         self.events = InMemoryEventStore()
@@ -275,6 +305,7 @@ class InMemoryUnitOfWork:
         self.artifacts = InMemoryArtifactCatalog(artifacts)
         self.runner_sessions = InMemoryRunnerSessionStore(runner_sessions)
         self.worker_results = InMemoryWorkerResultLedger(worker_results)
+        self.workspaces = InMemoryWorkspaceLedger(workspaces)
 
     def __enter__(self):
         self._working_tasks = dict(self._tasks)
@@ -287,8 +318,9 @@ class InMemoryUnitOfWork:
         self._working_artifacts = dict(self._artifacts)
         self._working_runner_sessions = dict(self._runner_sessions)
         self._working_worker_results = dict(self._worker_results)
+        self._working_workspaces = dict(self._workspaces)
         self._committed = False
-        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results)
+        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results, self._working_workspaces)
         return self
 
     def commit(self) -> None:
@@ -297,10 +329,11 @@ class InMemoryUnitOfWork:
         self._artifacts = self._working_artifacts
         self._runner_sessions = self._working_runner_sessions
         self._worker_results = self._working_worker_results
+        self._workspaces = self._working_workspaces
         self._committed = True
 
     def rollback(self) -> None:
         self._committed = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)

@@ -16,6 +16,8 @@ psycopg = pytest.importorskip("psycopg")
 
 from meta_loop.application.models import QueueEnqueueResult
 from meta_loop.application.runners import RunnerSessionRequest, RunnerSessionService
+from meta_loop.application.models import WorkspacePurpose, WorkspaceRequest
+from meta_loop.application.workspaces import FakeWorkspaceManager, WorkspaceAllocationService
 from meta_loop.application.services import TaskQueueService
 from meta_loop.infrastructure.memory import FixedClock, SequentialIdGenerator
 from meta_loop.domain.enums import EventType, RiskClass, Role, TaskStatus
@@ -44,7 +46,7 @@ def migrated_database():
 def isolate_disposable_database():
     """The disposable test user is privileged; runtime adapters never truncate events."""
     with connection() as db, db.cursor() as cursor:
-        cursor.execute("TRUNCATE task_events, task_queue, tasks CASCADE")
+        cursor.execute("TRUNCATE workspace_allocations, task_events, task_queue, tasks CASCADE")
         db.commit()
 
 
@@ -275,3 +277,42 @@ def test_uncommitted_runner_session_request_rolls_back_with_task_and_event():
     with PostgresUnitOfWork(connection) as uow:
         assert uow.tasks.get(task.task_id) is None
         assert uow.runner_sessions.get(request.session_id) is None
+
+
+def test_workspace_ledger_and_task_event_share_a_postgres_uow_boundary():
+    task = make_task()
+    request = WorkspaceRequest("workspace-" + task.task_id, task.task_id, Role.PLANNER, WorkspacePurpose.PLANNING, "a" * 40, 0, 0, "workspace-correlation")
+    service = WorkspaceAllocationService(FixedClock(NOW), SequentialIdGenerator("event"), FakeWorkspaceManager())
+    with PostgresUnitOfWork(connection) as uow:
+        uow.tasks.create(task)
+        assert service.allocate(uow, request).created
+        uow.commit()
+
+    with PostgresUnitOfWork(connection) as uow:
+        assert not service.allocate(uow, request).created
+        assert uow.workspaces.get(request.allocation_id).read_only
+        assert uow.events.read(task.task_id)[0].event_type is EventType.WORKSPACE_ALLOCATED
+
+
+def test_uncommitted_workspace_allocation_rolls_back_ledger_and_event():
+    task = make_task()
+    request = WorkspaceRequest("workspace-" + task.task_id, task.task_id, Role.PLANNER, WorkspacePurpose.PLANNING, "a" * 40, 0, 0, "workspace-correlation")
+    with PostgresUnitOfWork(connection) as uow:
+        uow.tasks.create(task)
+        WorkspaceAllocationService(FixedClock(NOW), SequentialIdGenerator("event"), FakeWorkspaceManager()).allocate(uow, request)
+
+    with PostgresUnitOfWork(connection) as uow:
+        assert uow.tasks.get(task.task_id) is None
+        assert uow.workspaces.get(request.allocation_id) is None
+
+
+def test_postgres_workspace_ledger_rejects_another_active_task_purpose():
+    task = make_task()
+    first = WorkspaceRequest("workspace-a-" + task.task_id, task.task_id, Role.PLANNER, WorkspacePurpose.PLANNING, "a" * 40, 0, 0, "workspace-a")
+    second = WorkspaceRequest("workspace-b-" + task.task_id, task.task_id, Role.PLANNER, WorkspacePurpose.PLANNING, "a" * 40, 0, 1, "workspace-b")
+    service = WorkspaceAllocationService(FixedClock(NOW), SequentialIdGenerator("event"), FakeWorkspaceManager())
+    with PostgresUnitOfWork(connection) as uow:
+        uow.tasks.create(task)
+        service.allocate(uow, first)
+        with pytest.raises(IdempotencyConflictError):
+            service.allocate(uow, second)

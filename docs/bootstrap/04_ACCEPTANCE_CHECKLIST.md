@@ -17,6 +17,11 @@
 [x] Phase 4 fake runner has no process, environment or task mutation access
 [x] Phase 5 workers publish only CAS references through the UoW
 [x] Phase 5 worker result IDs are idempotent and lease-bound
+[x] Phase 6 workspace requests are canonical and contain no path or credential
+[x] Phase 6 ledger/event allocation is atomic in memory and PostgreSQL
+[x] Phase 6 local adapter enforces allowlist, fixed SHA, managed-root and head-drift checks
+[x] Phase 6 applies read-only policy and rejects R3 implementation
+[x] Phase 6 implementation workspaces fail closed without governance
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT

@@ -51,3 +51,13 @@ lease, writes the output through CAS, then atomically records only its
 ArtifactRef, task evidence, domain transition and result idempotency record.
 Cancellation requires governance capability `cancel_execution`; missing policy
 fails closed. Workers have no process, network, workspace or credential access.
+
+## Phase 6 workspace boundary
+
+Phase 6 separates application workspace allocation from local Git execution.
+Canonical workspace requests have a stable allocation ID and exact source SHA,
+but no path or command. Ledger state and safe task events are transactional;
+the opt-in adapter receives only an allowlisted repository and creates a
+detached worktree below one managed root. It rejects path/symlink escape and
+head drift. Planner/reviewer policies are read-only, R3 is proposal-only, and
+implementer access is governance-authorized or rejected.

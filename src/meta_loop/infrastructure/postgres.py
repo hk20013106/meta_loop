@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest, WorkspaceState
 from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
 from meta_loop.domain.enums import EventType, Role, TaskStatus
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
@@ -313,6 +313,51 @@ class PostgresWorkerResultLedger:
         return WorkerResult(str(value["result_id"]), str(value["session_id"]), str(value["task_id"]), WorkerIdentity(str(value["worker_id"]), Role(str(value["role"]))), TaskStatus(str(value["target"])), str(value["summary"]), int(value["expected_task_version"]), int(value["expected_sequence"]), int(value["schema_version"]))
 
 
+def _workspace_request_from_dict(data: dict[str, object]) -> WorkspaceRequest:
+    from meta_loop.application.models import WorkspacePurpose
+    return WorkspaceRequest(str(data["allocation_id"]), str(data["task_id"]), Role(str(data["role"])), WorkspacePurpose(str(data["purpose"])), str(data["source_revision"]), int(data["expected_task_version"]), int(data["expected_sequence"]), str(data["correlation_id"]), data.get("governance_revision"), int(data["schema_version"]))
+
+
+class PostgresWorkspaceLedger:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def record_once(self, record: WorkspaceRecord):
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, read_only, repository_name, state FROM workspace_allocations WHERE allocation_id = %s FOR UPDATE", (record.workspace_id,))
+            row = cursor.fetchone()
+            if row is not None:
+                prior = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                if _canonical(prior) != record.request.canonical() or row[1] != record.read_only or row[2] != record.repository_name:
+                    raise IdempotencyConflictError("workspace allocation id has conflicting content")
+                return WorkspaceRecord(_workspace_request_from_dict(prior), row[1], row[2], WorkspaceState(row[3])), False
+            cursor.execute("SELECT allocation_id FROM workspace_allocations WHERE task_id = %s AND purpose = %s AND state = 'active' FOR UPDATE", (record.request.task_id, record.request.purpose.value))
+            if cursor.fetchone() is not None:
+                raise IdempotencyConflictError("task already has an active workspace for this purpose")
+            cursor.execute("INSERT INTO workspace_allocations (allocation_id, task_id, repository_name, role, purpose, source_revision, request_json, read_only, state, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, 'active', 1)", (record.workspace_id, record.request.task_id, record.repository_name, record.request.role.value, record.request.purpose.value, record.request.source_revision, record.request.canonical(), record.read_only))
+        return record, True
+
+    def get(self, allocation_id: str) -> WorkspaceRecord | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, read_only, repository_name, state FROM workspace_allocations WHERE allocation_id = %s", (allocation_id,))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        value = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return WorkspaceRecord(_workspace_request_from_dict(value), row[1], row[2], WorkspaceState(row[3]))
+
+    def release(self, allocation_id: str) -> WorkspaceRecord:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, read_only, repository_name, state FROM workspace_allocations WHERE allocation_id = %s FOR UPDATE", (allocation_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise TaskNotFoundError("workspace allocation does not exist")
+            if row[3] == WorkspaceState.ACTIVE.value:
+                cursor.execute("UPDATE workspace_allocations SET state = 'released', updated_at = now() WHERE allocation_id = %s", (allocation_id,))
+            value = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return WorkspaceRecord(_workspace_request_from_dict(value), row[1], row[2], WorkspaceState.RELEASED)
+
+
 class PostgresUnitOfWork:
     def __init__(self, connection_factory: Callable[[], object]) -> None:
         self._connection_factory = connection_factory
@@ -330,6 +375,7 @@ class PostgresUnitOfWork:
         self.artifacts = PostgresArtifactCatalog(self._connection)
         self.runner_sessions = PostgresRunnerSessionStore(self._connection)
         self.worker_results = PostgresWorkerResultLedger(self._connection)
+        self.workspaces = PostgresWorkspaceLedger(self._connection)
         self._committed = False
         return self
 

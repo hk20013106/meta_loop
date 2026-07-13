@@ -3,8 +3,8 @@ from typing import Protocol
 
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
-from meta_loop.domain.task import Task
-from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, WorkerResult, WorkerResultReceipt
+from meta_loop.domain.task import RepositoryTarget, Task
+from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest
 
 
 class TaskRepository(Protocol):
@@ -79,6 +79,17 @@ class WorkerResultLedger(Protocol):
     def get(self, result_id: str) -> WorkerResult | None: ...
 
 
+class WorkspaceManager(Protocol):
+    def allocate(self, request: WorkspaceRequest, repository: RepositoryTarget, read_only: bool) -> WorkspaceRecord: ...
+    def release(self, record: WorkspaceRecord) -> bool: ...
+
+
+class WorkspaceLedger(Protocol):
+    def record_once(self, record: WorkspaceRecord): ...
+    def get(self, allocation_id: str) -> WorkspaceRecord | None: ...
+    def release(self, allocation_id: str) -> WorkspaceRecord: ...
+
+
 class UnitOfWork(Protocol):
     tasks: TaskRepository
     events: EventStore
@@ -89,6 +100,7 @@ class UnitOfWork(Protocol):
     artifacts: ArtifactCatalog
     runner_sessions: RunnerSessionStore
     worker_results: WorkerResultLedger
+    workspaces: WorkspaceLedger
 
     def __enter__(self) -> "UnitOfWork": ...
     def commit(self) -> None: ...

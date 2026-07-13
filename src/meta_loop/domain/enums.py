@@ -40,3 +40,5 @@ class EventType(str, Enum):
     REVIEW_REWORK_REQUIRED = "review_rework_required"
     ARTIFACT_REGISTERED = "artifact_registered"
     RUNNER_SESSION_REQUESTED = "runner_session_requested"
+    WORKSPACE_ALLOCATED = "workspace_allocated"
+    WORKSPACE_RELEASED = "workspace_released"

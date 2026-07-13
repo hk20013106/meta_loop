@@ -79,3 +79,14 @@
   commits CAS references, task events, transitions and queue completion.
 - **Consequences:** cancellation requires `cancel_execution` governance and
   fails closed; no worker gets process, workspace or credential access.
+
+## ADR-008 — Managed local Git worktrees
+
+- **Decision:** Phase 6 introduces a provider-neutral workspace ledger and an
+  opt-in local Git worktree adapter with a deterministic fake as the default
+  contract implementation.
+- **Reason:** workers need an isolated repository boundary before any future
+  publication capability, without granting GitHub or credential access.
+- **Consequences:** requests carry a fixed commit SHA rather than a branch or
+  path; local roots are explicitly allowlisted; R3 is proposal-only and
+  read-only; implementation allocation requires governance and fails closed.

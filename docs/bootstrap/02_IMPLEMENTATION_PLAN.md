@@ -65,6 +65,19 @@ Stop conditions
   gate.
 - **Non-goals:** worktrees, shell/WSL, networks, GitHub, real Hermes and CI.
 
+## Phase 6
+
+- **Goal:** Provide a provider-neutral managed Git worktree boundary.
+- **Inputs:** Phase 5 task/session/queue contracts, a verified source SHA and
+  explicit local repository configuration.
+- **Required behavior:** canonical allocation idempotency, UoW ledger/event
+  atomicity, role/R3/fuse/governance checks, path-safe detached worktrees and
+  idempotent release.
+- **Tests:** fake/memory contract plus temporary local Git and disposable
+  PostgreSQL integration tests.
+- **Non-goals:** GitHub, CI, remote branches, publication, merge, revert,
+  real Hermes and real research execution.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,
