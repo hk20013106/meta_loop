@@ -33,3 +33,12 @@ default maximum attempts is three with exponential backoff from 30 seconds to
 
 No GitHub, Hermes, Docker worker, PAT broker, true CAS writes, research-data
 processing, automatic merge/revert, or governance-policy authoring is present.
+
+## Phase 4 runner boundary
+
+Phase 4 adds a schema-v1 provider-neutral runner session protocol. Requests
+contain only controlled role/task metadata and Task-owned artifact references;
+they cannot carry credentials, commands, environment variables, paths or raw
+output. The session ledger and request event share a UoW. The included fake
+runner is deterministic and isolated; real Hermes execution remains opt-in and
+unimplemented.

@@ -4,7 +4,7 @@ from typing import Protocol
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
-from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest
 
 
 class TaskRepository(Protocol):
@@ -68,6 +68,12 @@ class ControlEventStore(Protocol):
     def read(self) -> tuple[ControlEvent, ...]: ...
 
 
+class RunnerSessionStore(Protocol):
+    def record_once(self, request: RunnerSessionRequest) -> RunnerSessionReceipt: ...
+    def get(self, session_id: str) -> RunnerSessionRecord | None: ...
+    def set_outcome(self, outcome: RunnerSessionOutcome) -> RunnerSessionRecord: ...
+
+
 class UnitOfWork(Protocol):
     tasks: TaskRepository
     events: EventStore
@@ -76,6 +82,7 @@ class UnitOfWork(Protocol):
     intake_ledger: IntakeLedger
     control_events: ControlEventStore
     artifacts: ArtifactCatalog
+    runner_sessions: RunnerSessionStore
 
     def __enter__(self) -> "UnitOfWork": ...
     def commit(self) -> None: ...

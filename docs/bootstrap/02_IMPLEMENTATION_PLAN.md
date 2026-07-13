@@ -44,6 +44,16 @@ Stop conditions
 - **Tests:** CAS unit/contract tests plus disposable PostgreSQL catalog gate.
 - **Non-goals:** remote storage, deletion, encryption, workers, and Phase 4+.
 
+## Phase 4
+
+- **Goal:** Provide a provider-neutral Hermes runner session protocol.
+- **Inputs:** Phase 1 UoW/event stream, Phase 2 fuse and Phase 3 references.
+- **Required behavior:** canonical session idempotency, task/event atomicity,
+  R3 implementer rejection and credential-free fake-runner contracts.
+- **Tests:** memory and disposable PostgreSQL session-ledger tests.
+- **Non-goals:** real Hermes execution, workers, shell/WSL, worktrees, GitHub,
+  CI and publishing.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,

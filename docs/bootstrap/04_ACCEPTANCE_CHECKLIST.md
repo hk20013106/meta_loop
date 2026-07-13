@@ -13,6 +13,8 @@
 [x] Phase 2 fuse schema uses persistent state and append-only audit events
 [x] Phase 3 SHA-256 CAS verifies blobs and deduplicates content
 [x] Phase 3 catalog/task/event registration shares a UoW boundary
+[x] Phase 4 runner session requests are canonical, idempotent and atomic
+[x] Phase 4 fake runner has no process, environment or task mutation access
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT

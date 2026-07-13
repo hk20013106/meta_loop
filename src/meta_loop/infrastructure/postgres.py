@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState
 from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
 from meta_loop.domain.enums import EventType, Role
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
@@ -236,6 +236,57 @@ class PostgresArtifactCatalog:
             return tuple(row[0] for row in cursor.fetchall())
 
 
+def _runner_request_from_dict(data: dict[str, object]) -> RunnerSessionRequest:
+    artifacts = tuple(
+        ArtifactRef(ArtifactDigest(str(item["digest"]).removeprefix("sha256:")), str(item["logical_name"]), str(item["media_type"]), int(item["schema_version"]))
+        for item in data["input_artifacts"]
+    )
+    return RunnerSessionRequest(str(data["session_id"]), str(data["task_id"]), Role(str(data["role"])), int(data["expected_task_version"]), int(data["expected_sequence"]), artifacts, int(data["timeout_seconds"]), str(data["correlation_id"]), int(data["schema_version"]))
+
+
+class PostgresRunnerSessionStore:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def record_once(self, request: RunnerSessionRequest) -> RunnerSessionReceipt:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, state FROM runner_sessions WHERE session_id = %s FOR UPDATE", (request.session_id,))
+            row = cursor.fetchone()
+            if row is not None:
+                prior = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                if _canonical(prior) != request.canonical():
+                    raise IdempotencyConflictError("runner session id has conflicting request")
+                return RunnerSessionReceipt(request.session_id, RunnerSessionState(row[1]), False)
+            cursor.execute("INSERT INTO runner_sessions (session_id, task_id, role, expected_task_version, expected_sequence, request_json, state, schema_version) VALUES (%s, %s, %s, %s, %s, %s::jsonb, 'requested', 1)", (request.session_id, request.task_id, request.role.value, request.expected_task_version, request.expected_sequence, request.canonical()))
+        return RunnerSessionReceipt(request.session_id, RunnerSessionState.REQUESTED, True)
+
+    def get(self, session_id: str) -> RunnerSessionRecord | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT request_json, state, outcome_json FROM runner_sessions WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        outcome = None if row[2] is None else RunnerSessionOutcome(session_id, RunnerSessionState(row[2]["state"]), row[2]["summary"])
+        return RunnerSessionRecord(_runner_request_from_dict(data), RunnerSessionState(row[1]), outcome)
+
+    def set_outcome(self, outcome: RunnerSessionOutcome) -> RunnerSessionRecord:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT outcome_json FROM runner_sessions WHERE session_id = %s FOR UPDATE", (outcome.session_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise ValidationError("runner session does not exist")
+            canonical = _canonical({"state": outcome.state.value, "summary": outcome.summary})
+            if row[0] is not None:
+                prior = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                if _canonical(prior) != canonical:
+                    raise IdempotencyConflictError("runner session has conflicting outcome")
+            else:
+                cursor.execute("UPDATE runner_sessions SET state = %s, outcome_json = %s::jsonb, updated_at = now() WHERE session_id = %s", (outcome.state.value, canonical, outcome.session_id))
+        record = self.get(outcome.session_id)
+        return record
+
+
 class PostgresUnitOfWork:
     def __init__(self, connection_factory: Callable[[], object]) -> None:
         self._connection_factory = connection_factory
@@ -251,6 +302,7 @@ class PostgresUnitOfWork:
         self.intake_ledger = PostgresIntakeLedger(self._connection)
         self.control_events = PostgresControlEventStore(self._connection)
         self.artifacts = PostgresArtifactCatalog(self._connection)
+        self.runner_sessions = PostgresRunnerSessionStore(self._connection)
         self._committed = False
         return self
 

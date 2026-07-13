@@ -39,3 +39,4 @@ class EventType(str, Enum):
     TASK_BLOCKED = "task_blocked"
     REVIEW_REWORK_REQUIRED = "review_rework_required"
     ARTIFACT_REGISTERED = "artifact_registered"
+    RUNNER_SESSION_REQUESTED = "runner_session_requested"

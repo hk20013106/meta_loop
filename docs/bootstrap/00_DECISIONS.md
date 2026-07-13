@@ -63,3 +63,12 @@
   only artifact metadata and references.
 - **Consequences:** database rollback can leave report-only orphan blobs; blobs
   never enter events or logs, and secret-marked input is rejected before write.
+
+## ADR-006 — Fake-first Hermes runner protocol
+
+- **Decision:** Phase 4 ships a provider-neutral, persistent session protocol
+  with a deterministic fake runner; it does not invoke Hermes or WSL.
+- **Reason:** no approved executable runtime or credentials are available for
+  a safe real integration gate.
+- **Consequences:** runner requests exclude secrets, commands, paths and
+  environments. Real adapter validation is explicitly deferred.

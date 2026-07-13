@@ -15,7 +15,9 @@ if not DSN:
 psycopg = pytest.importorskip("psycopg")
 
 from meta_loop.application.models import QueueEnqueueResult
+from meta_loop.application.runners import RunnerSessionRequest, RunnerSessionService
 from meta_loop.application.services import TaskQueueService
+from meta_loop.infrastructure.memory import FixedClock, SequentialIdGenerator
 from meta_loop.domain.enums import EventType, RiskClass, Role, TaskStatus
 from meta_loop.domain.errors import IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
@@ -245,3 +247,31 @@ def test_expired_max_attempt_is_terminalized_atomically_by_service():
     with PostgresUnitOfWork(connection) as uow:
         assert uow.tasks.get(task.task_id).status is TaskStatus.FAILED
         assert uow.events.read(task.task_id) == (event,)
+
+
+def test_runner_session_ledger_is_idempotent_and_task_event_atomic():
+    task = make_task()
+    request = RunnerSessionRequest("session-" + task.task_id, task.task_id, Role.PLANNER, 0, 0, (), 60, "runner-correlation")
+    service = RunnerSessionService(FixedClock(NOW), SequentialIdGenerator("event"))
+    with PostgresUnitOfWork(connection) as uow:
+        uow.tasks.create(task)
+        assert service.request(uow, request).created
+        uow.commit()
+
+    with PostgresUnitOfWork(connection) as uow:
+        assert not service.request(uow, request).created
+        with pytest.raises(IdempotencyConflictError):
+            service.request(uow, RunnerSessionRequest(request.session_id, task.task_id, Role.PLANNER, 0, 0, (), 61, "runner-correlation"))
+        assert len(uow.events.read(task.task_id)) == 1
+
+
+def test_uncommitted_runner_session_request_rolls_back_with_task_and_event():
+    task = make_task()
+    request = RunnerSessionRequest("session-" + task.task_id, task.task_id, Role.PLANNER, 0, 0, (), 60, "runner-correlation")
+    with PostgresUnitOfWork(connection) as uow:
+        uow.tasks.create(task)
+        RunnerSessionService(FixedClock(NOW), SequentialIdGenerator("event")).request(uow, request)
+
+    with PostgresUnitOfWork(connection) as uow:
+        assert uow.tasks.get(task.task_id) is None
+        assert uow.runner_sessions.get(request.session_id) is None
