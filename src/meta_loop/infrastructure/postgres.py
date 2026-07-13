@@ -4,9 +4,9 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt
 from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
-from meta_loop.domain.enums import EventType, Role
+from meta_loop.domain.enums import EventType, Role, TaskStatus
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -287,6 +287,32 @@ class PostgresRunnerSessionStore:
         return record
 
 
+class PostgresWorkerResultLedger:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def record_once(self, result: WorkerResult) -> WorkerResultReceipt:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT result_json FROM worker_results WHERE result_id = %s FOR UPDATE", (result.result_id,))
+            row = cursor.fetchone()
+            if row is not None:
+                prior = row[0] if isinstance(row[0], str) else _canonical(row[0])
+                if prior != result.canonical():
+                    raise IdempotencyConflictError("worker result id has conflicting content")
+                return WorkerResultReceipt(result.result_id, False)
+            cursor.execute("INSERT INTO worker_results (result_id, session_id, task_id, result_json, schema_version) VALUES (%s, %s, %s, %s::jsonb, 1)", (result.result_id, result.session_id, result.task_id, result.canonical()))
+        return WorkerResultReceipt(result.result_id, True)
+
+    def get(self, result_id: str) -> WorkerResult | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT result_json FROM worker_results WHERE result_id = %s", (result_id,))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        value = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return WorkerResult(str(value["result_id"]), str(value["session_id"]), str(value["task_id"]), WorkerIdentity(str(value["worker_id"]), Role(str(value["role"]))), TaskStatus(str(value["target"])), str(value["summary"]), int(value["expected_task_version"]), int(value["expected_sequence"]), int(value["schema_version"]))
+
+
 class PostgresUnitOfWork:
     def __init__(self, connection_factory: Callable[[], object]) -> None:
         self._connection_factory = connection_factory
@@ -303,6 +329,7 @@ class PostgresUnitOfWork:
         self.control_events = PostgresControlEventStore(self._connection)
         self.artifacts = PostgresArtifactCatalog(self._connection)
         self.runner_sessions = PostgresRunnerSessionStore(self._connection)
+        self.worker_results = PostgresWorkerResultLedger(self._connection)
         self._committed = False
         return self
 

@@ -4,7 +4,7 @@ from enum import Enum
 import json
 
 from meta_loop.domain.artifacts import ArtifactRef
-from meta_loop.domain.enums import Role
+from meta_loop.domain.enums import Role, TaskStatus
 from meta_loop.domain.errors import ValidationError
 
 
@@ -130,4 +130,42 @@ class RunnerSessionRecord:
 class RunnerSessionReceipt:
     session_id: str
     state: RunnerSessionState
+    created: bool
+
+
+@dataclass(frozen=True)
+class WorkerIdentity:
+    worker_id: str
+    role: Role
+
+    def __post_init__(self) -> None:
+        if not self.worker_id or self.role not in (Role.PLANNER, Role.DESIGN_REVIEWER, Role.IMPLEMENTER, Role.PATCH_REVIEWER):
+            raise ValidationError("worker identity is not authorized for a worker role")
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    result_id: str
+    session_id: str
+    task_id: str
+    worker: WorkerIdentity
+    target: TaskStatus
+    summary: str
+    expected_task_version: int
+    expected_sequence: int
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.result_id or not self.session_id or not self.task_id or not self.summary or len(self.summary) > 512:
+            raise ValidationError("worker result is invalid")
+        if not isinstance(self.target, TaskStatus) or self.expected_task_version < 0 or self.expected_sequence < 0 or self.schema_version != 1:
+            raise ValidationError("worker result version is invalid")
+
+    def canonical(self) -> str:
+        return json.dumps({"schema_version": 1, "result_id": self.result_id, "session_id": self.session_id, "task_id": self.task_id, "worker_id": self.worker.worker_id, "role": self.worker.role.value, "target": self.target.value, "summary": self.summary, "expected_task_version": self.expected_task_version, "expected_sequence": self.expected_sequence}, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class WorkerResultReceipt:
+    result_id: str
     created: bool

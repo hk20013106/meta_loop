@@ -9,7 +9,7 @@ def test_migration_runner_orders_files_and_calculates_stable_checksums():
 
     migrations = runner.plan()
 
-    assert [migration.version for migration in migrations] == ["0001_phase1b_core", "0002_phase2_control", "0003_phase3_artifacts", "0004_phase4_runner_sessions"]
+    assert [migration.version for migration in migrations] == ["0001_phase1b_core", "0002_phase2_control", "0003_phase3_artifacts", "0004_phase4_runner_sessions", "0005_phase5_worker_results"]
     assert len(migrations[0].checksum) == 64
 
 

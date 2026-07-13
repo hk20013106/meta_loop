@@ -54,6 +54,17 @@ Stop conditions
 - **Non-goals:** real Hermes execution, workers, shell/WSL, worktrees, GitHub,
   CI and publishing.
 
+## Phase 5
+
+- **Goal:** Provide role-isolated fake-runner worker orchestration.
+- **Inputs:** Phase 4 sessions, queue leases and Phase 3 CAS/catalog.
+- **Required behavior:** worker/result idempotency, role and R3 enforcement,
+  CAS-reference-only publication, lease-bound completion and fail-closed
+  governance cancellation.
+- **Tests:** memory contracts and disposable PostgreSQL migration/full-suite
+  gate.
+- **Non-goals:** worktrees, shell/WSL, networks, GitHub, real Hermes and CI.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,

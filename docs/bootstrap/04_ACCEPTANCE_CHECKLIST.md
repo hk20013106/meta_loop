@@ -15,6 +15,8 @@
 [x] Phase 3 catalog/task/event registration shares a UoW boundary
 [x] Phase 4 runner session requests are canonical, idempotent and atomic
 [x] Phase 4 fake runner has no process, environment or task mutation access
+[x] Phase 5 workers publish only CAS references through the UoW
+[x] Phase 5 worker result IDs are idempotent and lease-bound
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT

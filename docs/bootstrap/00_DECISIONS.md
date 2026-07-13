@@ -72,3 +72,10 @@
   a safe real integration gate.
 - **Consequences:** runner requests exclude secrets, commands, paths and
   environments. Real adapter validation is explicitly deferred.
+
+## ADR-007 — Role-isolated worker publication
+
+- **Decision:** workers return structured results; only the application service
+  commits CAS references, task events, transitions and queue completion.
+- **Consequences:** cancellation requires `cancel_execution` governance and
+  fails closed; no worker gets process, workspace or credential access.

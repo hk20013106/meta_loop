@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -229,6 +229,23 @@ class InMemoryRunnerSessionStore:
         return updated
 
 
+class InMemoryWorkerResultLedger:
+    def __init__(self, results: dict[str, WorkerResult]) -> None:
+        self._results = results
+
+    def record_once(self, result: WorkerResult) -> WorkerResultReceipt:
+        current = self._results.get(result.result_id)
+        if current is not None:
+            if current.canonical() != result.canonical():
+                raise IdempotencyConflictError("worker result id has conflicting content")
+            return WorkerResultReceipt(result.result_id, False)
+        self._results[result.result_id] = result
+        return WorkerResultReceipt(result.result_id, True)
+
+    def get(self, result_id: str) -> WorkerResult | None:
+        return self._results.get(result_id)
+
+
 class InMemoryUnitOfWork:
     """Copy-on-write UoW used to prove the same commit boundary as PostgreSQL."""
 
@@ -242,10 +259,11 @@ class InMemoryUnitOfWork:
         self._control_events: list[ControlEvent] = []
         self._artifacts: dict[str, CatalogedArtifact] = {}
         self._runner_sessions: dict[str, RunnerSessionRecord] = {}
+        self._worker_results: dict[str, WorkerResult] = {}
         self._committed = False
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results)
 
-    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord]) -> None:
+    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult]) -> None:
         self.tasks = InMemoryTaskRepository()
         self.tasks._tasks = tasks
         self.events = InMemoryEventStore()
@@ -256,6 +274,7 @@ class InMemoryUnitOfWork:
         self.control_events = InMemoryControlEventStore(control_events)
         self.artifacts = InMemoryArtifactCatalog(artifacts)
         self.runner_sessions = InMemoryRunnerSessionStore(runner_sessions)
+        self.worker_results = InMemoryWorkerResultLedger(worker_results)
 
     def __enter__(self):
         self._working_tasks = dict(self._tasks)
@@ -267,8 +286,9 @@ class InMemoryUnitOfWork:
         self._working_control_events = list(self._control_events)
         self._working_artifacts = dict(self._artifacts)
         self._working_runner_sessions = dict(self._runner_sessions)
+        self._working_worker_results = dict(self._worker_results)
         self._committed = False
-        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts, self._working_runner_sessions)
+        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results)
         return self
 
     def commit(self) -> None:
@@ -276,10 +296,11 @@ class InMemoryUnitOfWork:
         self._fuse_state, self._intakes, self._control_events = self._working_fuse_state, self._working_intakes, self._working_control_events
         self._artifacts = self._working_artifacts
         self._runner_sessions = self._working_runner_sessions
+        self._worker_results = self._working_worker_results
         self._committed = True
 
     def rollback(self) -> None:
         self._committed = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results)

@@ -42,3 +42,12 @@ they cannot carry credentials, commands, environment variables, paths or raw
 output. The session ledger and request event share a UoW. The included fake
 runner is deterministic and isolated; real Hermes execution remains opt-in and
 unimplemented.
+
+## Phase 5 worker boundary
+
+Phase 5 workers are role-constrained producers of structured results. The
+application publication service alone validates a successful session and queue
+lease, writes the output through CAS, then atomically records only its
+ArtifactRef, task evidence, domain transition and result idempotency record.
+Cancellation requires governance capability `cancel_execution`; missing policy
+fails closed. Workers have no process, network, workspace or credential access.
