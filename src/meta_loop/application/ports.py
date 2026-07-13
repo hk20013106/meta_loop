@@ -4,7 +4,7 @@ from typing import Protocol
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
-from .models import ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
 
 
 class TaskRepository(Protocol):
@@ -32,6 +32,12 @@ class TaskQueue(Protocol):
 class ArtifactStore(Protocol):
     def register(self, reference: ArtifactRef) -> ArtifactRef: ...
     def get(self, digest: str) -> ArtifactRef | None: ...
+
+
+class ArtifactCatalog(Protocol):
+    def register(self, artifact: CatalogedArtifact) -> CatalogedArtifact: ...
+    def get(self, digest: str) -> CatalogedArtifact | None: ...
+    def digests(self) -> tuple[str, ...]: ...
 
 
 class Clock(Protocol):
@@ -69,6 +75,7 @@ class UnitOfWork(Protocol):
     fuse: FuseStore
     intake_ledger: IntakeLedger
     control_events: ControlEventStore
+    artifacts: ArtifactCatalog
 
     def __enter__(self) -> "UnitOfWork": ...
     def commit(self) -> None: ...

@@ -56,3 +56,10 @@
   the local fuse is persisted in PostgreSQL with append-only control audit.
 - **Consequences:** no REST server, subprocess execution, or provider authority
   is introduced; unauthorised release fails closed.
+
+## ADR-005 — Local CAS and catalog split
+
+- **Decision:** blobs use a local SHA-256 filesystem CAS while PostgreSQL stores
+  only artifact metadata and references.
+- **Consequences:** database rollback can leave report-only orphan blobs; blobs
+  never enter events or logs, and secret-marked input is rejected before write.

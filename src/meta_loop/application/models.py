@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from meta_loop.domain.artifacts import ArtifactRef
+
 
 @dataclass(frozen=True)
 class Lease:
@@ -48,3 +50,11 @@ class ControlEvent:
     action: str
     occurred_at: datetime
     governance_revision: str | None = None
+
+
+@dataclass(frozen=True)
+class CatalogedArtifact:
+    reference: ArtifactRef
+    classification: str
+    source_kind: str
+    size_bytes: int

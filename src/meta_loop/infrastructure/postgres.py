@@ -4,7 +4,8 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
 from meta_loop.domain.enums import EventType, Role
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
 from meta_loop.domain.events import Event
@@ -209,6 +210,32 @@ class PostgresControlEventStore:
             return tuple(ControlEvent(row[0], row[1], row[2]) for row in cursor.fetchall())
 
 
+class PostgresArtifactCatalog:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+    def register(self, artifact: CatalogedArtifact) -> CatalogedArtifact:
+        ref = artifact.reference
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT logical_name, media_type, classification, source_kind, size_bytes FROM artifact_catalog WHERE digest = %s FOR UPDATE", (ref.digest.value,))
+            row = cursor.fetchone()
+            if row is not None:
+                current = CatalogedArtifact(ArtifactRef(ArtifactDigest(ref.digest.value), row[0], row[1]), row[2], row[3], row[4])
+                if current != artifact:
+                    raise IdempotencyConflictError("artifact digest has conflicting metadata")
+                return current
+            cursor.execute("INSERT INTO artifact_catalog (digest, logical_name, media_type, classification, source_kind, size_bytes) VALUES (%s, %s, %s, %s, %s, %s)", (ref.digest.value, ref.logical_name, ref.media_type, artifact.classification, artifact.source_kind, artifact.size_bytes))
+        return artifact
+    def get(self, digest: str) -> CatalogedArtifact | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT logical_name, media_type, classification, source_kind, size_bytes FROM artifact_catalog WHERE digest = %s", (digest,))
+            row = cursor.fetchone()
+        return None if row is None else CatalogedArtifact(ArtifactRef(ArtifactDigest(digest), row[0], row[1]), row[2], row[3], row[4])
+    def digests(self) -> tuple[str, ...]:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT digest FROM artifact_catalog ORDER BY digest")
+            return tuple(row[0] for row in cursor.fetchall())
+
+
 class PostgresUnitOfWork:
     def __init__(self, connection_factory: Callable[[], object]) -> None:
         self._connection_factory = connection_factory
@@ -223,6 +250,7 @@ class PostgresUnitOfWork:
         self.fuse = PostgresFuseStore(self._connection)
         self.intake_ledger = PostgresIntakeLedger(self._connection)
         self.control_events = PostgresControlEventStore(self._connection)
+        self.artifacts = PostgresArtifactCatalog(self._connection)
         self._committed = False
         return self
 

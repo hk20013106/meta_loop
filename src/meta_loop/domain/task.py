@@ -116,3 +116,8 @@ class Task:
         if self.status is not TaskStatus.BLOCKED or actor is not Role.VALIDATOR:
             raise InvalidTransitionError("only validator can explicitly unblock a task")
         return replace(self, status=TaskStatus.VALIDATED, version=self.version + 1)
+
+    def attach_artifact(self, artifact: ArtifactRef) -> "Task":
+        if artifact in self.artifacts:
+            return self
+        return replace(self, artifacts=(*self.artifacts, artifact), version=self.version + 1)

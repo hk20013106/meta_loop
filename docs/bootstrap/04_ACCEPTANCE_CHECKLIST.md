@@ -11,6 +11,8 @@
 [x] Phase 2 synthetic intake is atomic and idempotent
 [x] Phase 2 local CLI entry point and schema-versioned output exist
 [x] Phase 2 fuse schema uses persistent state and append-only audit events
+[x] Phase 3 SHA-256 CAS verifies blobs and deduplicates content
+[x] Phase 3 catalog/task/event registration shares a UoW boundary
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT

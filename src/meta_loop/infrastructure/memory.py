@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from meta_loop.application.models import ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -184,6 +184,22 @@ class InMemoryControlEventStore:
         return tuple(self._events)
 
 
+class InMemoryArtifactCatalog:
+    def __init__(self, artifacts: dict[str, CatalogedArtifact]) -> None:
+        self._artifacts = artifacts
+    def register(self, artifact: CatalogedArtifact) -> CatalogedArtifact:
+        digest = artifact.reference.digest.value
+        current = self._artifacts.get(digest)
+        if current is not None and current != artifact:
+            raise IdempotencyConflictError("artifact digest has conflicting metadata")
+        self._artifacts[digest] = artifact
+        return artifact
+    def get(self, digest: str) -> CatalogedArtifact | None:
+        return self._artifacts.get(digest)
+    def digests(self) -> tuple[str, ...]:
+        return tuple(self._artifacts)
+
+
 class InMemoryUnitOfWork:
     """Copy-on-write UoW used to prove the same commit boundary as PostgreSQL."""
 
@@ -195,10 +211,11 @@ class InMemoryUnitOfWork:
         self._fuse_state = {"value": FuseState(False, datetime.min)}
         self._intakes: dict[str, IntakeRecord] = {}
         self._control_events: list[ControlEvent] = []
+        self._artifacts: dict[str, CatalogedArtifact] = {}
         self._committed = False
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts)
 
-    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent]) -> None:
+    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact]) -> None:
         self.tasks = InMemoryTaskRepository()
         self.tasks._tasks = tasks
         self.events = InMemoryEventStore()
@@ -207,6 +224,7 @@ class InMemoryUnitOfWork:
         self.fuse = InMemoryFuseStore(fuse_state)
         self.intake_ledger = InMemoryIntakeLedger(intakes)
         self.control_events = InMemoryControlEventStore(control_events)
+        self.artifacts = InMemoryArtifactCatalog(artifacts)
 
     def __enter__(self):
         self._working_tasks = dict(self._tasks)
@@ -216,17 +234,19 @@ class InMemoryUnitOfWork:
         self._working_fuse_state = dict(self._fuse_state)
         self._working_intakes = dict(self._intakes)
         self._working_control_events = list(self._control_events)
+        self._working_artifacts = dict(self._artifacts)
         self._committed = False
-        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events)
+        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts)
         return self
 
     def commit(self) -> None:
         self._tasks, self._events, self._event_ids, self._queue_records = self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records
         self._fuse_state, self._intakes, self._control_events = self._working_fuse_state, self._working_intakes, self._working_control_events
+        self._artifacts = self._working_artifacts
         self._committed = True
 
     def rollback(self) -> None:
         self._committed = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts)

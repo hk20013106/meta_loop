@@ -34,6 +34,16 @@ Stop conditions
 - **Tests:** controller/CLI unit tests plus disposable PostgreSQL migration gate.
 - **Non-goals:** GitHub, Hermes, execution, REST, CAS blobs, and Phase 3+.
 
+## Phase 3
+
+- **Goal:** Provide a local SHA-256 content-addressed artifact store.
+- **Inputs:** Phase 2 UoW, Task/event ports, and a configured CAS root.
+- **Required behavior:** verified atomic blob writes, metadata catalog, atomic
+  task/reference event registration, secret rejection, and report-only orphan
+  detection.
+- **Tests:** CAS unit/contract tests plus disposable PostgreSQL catalog gate.
+- **Non-goals:** remote storage, deletion, encryption, workers, and Phase 4+.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,
