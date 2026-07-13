@@ -1,0 +1,20 @@
+import pytest
+
+from meta_loop.domain.errors import ValidationError
+from meta_loop.infrastructure.migrations import MigrationRunner
+
+
+def test_migration_runner_orders_files_and_calculates_stable_checksums():
+    runner = MigrationRunner.from_directory("migrations")
+
+    migrations = runner.plan()
+
+    assert [migration.version for migration in migrations] == ["0001_phase1b_core"]
+    assert len(migrations[0].checksum) == 64
+
+
+def test_migration_runner_rejects_unknown_or_out_of_order_ledger_entries():
+    runner = MigrationRunner.from_directory("migrations")
+
+    with pytest.raises(ValidationError):
+        runner.validate_applied(("0002_future",))
