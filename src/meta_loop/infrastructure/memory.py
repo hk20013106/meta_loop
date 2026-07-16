@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -174,6 +174,21 @@ class InMemoryIntakeLedger:
         return record
 
 
+class InMemorySourceIngestionLedger:
+    def __init__(self, records: dict[str, IssueIngestionRecord]) -> None:
+        self._records = records
+    def get(self, source_key: str) -> IssueIngestionRecord | None:
+        return self._records.get(source_key)
+    def record_once(self, record: IssueIngestionRecord) -> tuple[IssueIngestionRecord, bool]:
+        current = self._records.get(record.source_key)
+        if current is not None:
+            if current != record:
+                raise IdempotencyConflictError("source has conflicting canonical content")
+            return current, False
+        self._records[record.source_key] = record
+        return record, True
+
+
 class InMemoryControlEventStore:
     def __init__(self, events: list[ControlEvent]) -> None:
         self._events = events
@@ -285,15 +300,16 @@ class InMemoryUnitOfWork:
         self._queue_records: dict[str, _QueueRecord] = {}
         self._fuse_state = {"value": FuseState(False, datetime.min)}
         self._intakes: dict[str, IntakeRecord] = {}
+        self._source_ingestions: dict[str, IssueIngestionRecord] = {}
         self._control_events: list[ControlEvent] = []
         self._artifacts: dict[str, CatalogedArtifact] = {}
         self._runner_sessions: dict[str, RunnerSessionRecord] = {}
         self._worker_results: dict[str, WorkerResult] = {}
         self._workspaces: dict[str, WorkspaceRecord] = {}
         self._committed = False
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
 
-    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult], workspaces: dict[str, WorkspaceRecord]) -> None:
+    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], source_ingestions: dict[str, IssueIngestionRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult], workspaces: dict[str, WorkspaceRecord]) -> None:
         self.tasks = InMemoryTaskRepository()
         self.tasks._tasks = tasks
         self.events = InMemoryEventStore()
@@ -301,6 +317,7 @@ class InMemoryUnitOfWork:
         self.queue = InMemoryTaskQueue(queue_records)
         self.fuse = InMemoryFuseStore(fuse_state)
         self.intake_ledger = InMemoryIntakeLedger(intakes)
+        self.source_ingestions = InMemorySourceIngestionLedger(source_ingestions)
         self.control_events = InMemoryControlEventStore(control_events)
         self.artifacts = InMemoryArtifactCatalog(artifacts)
         self.runner_sessions = InMemoryRunnerSessionStore(runner_sessions)
@@ -314,18 +331,19 @@ class InMemoryUnitOfWork:
         self._working_queue_records = dict(self._queue_records)
         self._working_fuse_state = dict(self._fuse_state)
         self._working_intakes = dict(self._intakes)
+        self._working_source_ingestions = dict(self._source_ingestions)
         self._working_control_events = list(self._control_events)
         self._working_artifacts = dict(self._artifacts)
         self._working_runner_sessions = dict(self._runner_sessions)
         self._working_worker_results = dict(self._worker_results)
         self._working_workspaces = dict(self._workspaces)
         self._committed = False
-        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results, self._working_workspaces)
+        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_source_ingestions, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results, self._working_workspaces)
         return self
 
     def commit(self) -> None:
         self._tasks, self._events, self._event_ids, self._queue_records = self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records
-        self._fuse_state, self._intakes, self._control_events = self._working_fuse_state, self._working_intakes, self._working_control_events
+        self._fuse_state, self._intakes, self._source_ingestions, self._control_events = self._working_fuse_state, self._working_intakes, self._working_source_ingestions, self._working_control_events
         self._artifacts = self._working_artifacts
         self._runner_sessions = self._working_runner_sessions
         self._worker_results = self._working_worker_results
@@ -336,4 +354,4 @@ class InMemoryUnitOfWork:
         self._committed = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)

@@ -22,6 +22,9 @@
 [x] Phase 6 local adapter enforces allowlist, fixed SHA, managed-root and head-drift checks
 [x] Phase 6 applies read-only policy and rejects R3 implementation
 [x] Phase 6 implementation workspaces fail closed without governance
+[x] Phase 7 Issue contract is canonical, artifact-backed and idempotent
+[x] Phase 7 only ingests open Issues with an authorized GitHub label event
+[x] Phase 7 source ledger/task/event/catalog writes share a UoW
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT

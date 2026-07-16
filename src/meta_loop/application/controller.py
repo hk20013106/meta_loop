@@ -57,8 +57,8 @@ class TaskIntakeService:
         now = self._clock.now()
         task = Task.create(request.request_id, TaskSource(request.source_kind, request.source_reference), RepositoryTarget(request.repository_name, request.repository_revision), RiskAssessment(request.proposed_risk, request.validated_risk, request.effective_risk, governance_revision=request.governance_revision), now)
         event = Event(self._ids.new(), task.task_id, EventType.TASK_RECEIVED, now, Role.SYSTEM, {"request_id": request.request_id}, 1, None, request.request_id, 1)
-        uow.intake_ledger.create(IntakeRecord(request.request_id, canonical, task.task_id))
         uow.tasks.create(task)
+        uow.intake_ledger.create(IntakeRecord(request.request_id, canonical, task.task_id))
         uow.events.append(event, 0)
         if request.enqueue:
             uow.queue.enqueue(task.task_id, request.priority, now, request.request_id)

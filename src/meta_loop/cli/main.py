@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 
 from meta_loop.application.controller import FuseService, IntakeRequest, TaskIntakeService, TaskQueryService
-from meta_loop.cli.runtime import UnavailableGovernance, doctor, unit_of_work
+from meta_loop.cli.runtime import UnavailableGovernance, doctor, github_ingestion_service, github_issue_source, unit_of_work
 from meta_loop.domain.enums import RiskClass, TaskStatus
-from meta_loop.domain.errors import DomainError, TaskNotFoundError
+from meta_loop.domain.errors import DomainError, IdempotencyConflictError, TaskNotFoundError
 from meta_loop.infrastructure.memory import SequentialIdGenerator
 from datetime import datetime, timezone
 
@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status"); status.add_argument("task_id"); status.add_argument("--json", action="store_true")
     tasks = sub.add_parser("tasks"); tasks.add_argument("--status"); tasks.add_argument("--risk", choices=[item.value for item in RiskClass]); tasks.add_argument("--json", action="store_true")
     fuse = sub.add_parser("fuse"); fuse.add_argument("action", choices=("status", "engage", "release")); fuse.add_argument("--governance-revision"); fuse.add_argument("--json", action="store_true")
+    github = sub.add_parser("github"); github_sub = github.add_subparsers(dest="github_action", required=True); sync = github_sub.add_parser("sync"); sync.add_argument("--limit", type=int, default=50); sync.add_argument("--json", action="store_true")
     return parser
 
 
@@ -74,6 +75,18 @@ def main(argv: list[str] | None = None) -> int:
                 values = TaskQueryService().tasks(uow, status, risk)
             _emit({"tasks": [_task_summary(task) for task in values]}, args.json)
             return 0
+        if args.command == "github":
+            service, outcomes = github_ingestion_service(), []
+            for candidate in github_issue_source().scan(args.limit):
+                try:
+                    with unit_of_work() as uow:
+                        receipt = service.ingest(uow, candidate)
+                        uow.commit()
+                    outcomes.append({"source_key": candidate.source_key, "task_id": receipt.task_id, "status": "ingested" if receipt.created else "duplicate"})
+                except IdempotencyConflictError:
+                    outcomes.append({"source_key": candidate.source_key, "status": "conflict"})
+            _emit({"results": outcomes}, args.json)
+            return 2 if any(value["status"] == "conflict" for value in outcomes) else 0
         with unit_of_work() as uow:
             service, clock = FuseService(), SystemClock()
             if args.action == "status":

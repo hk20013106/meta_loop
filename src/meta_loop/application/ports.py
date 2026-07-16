@@ -4,7 +4,7 @@ from typing import Protocol
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import RepositoryTarget, Task
-from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest
+from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest
 
 
 class TaskRepository(Protocol):
@@ -63,6 +63,11 @@ class IntakeLedger(Protocol):
     def create(self, record: IntakeRecord) -> IntakeRecord: ...
 
 
+class SourceIngestionLedger(Protocol):
+    def get(self, source_key: str) -> IssueIngestionRecord | None: ...
+    def record_once(self, record: IssueIngestionRecord) -> tuple[IssueIngestionRecord, bool]: ...
+
+
 class ControlEventStore(Protocol):
     def append(self, event: ControlEvent) -> ControlEvent: ...
     def read(self) -> tuple[ControlEvent, ...]: ...
@@ -96,6 +101,7 @@ class UnitOfWork(Protocol):
     queue: TaskQueue
     fuse: FuseStore
     intake_ledger: IntakeLedger
+    source_ingestions: SourceIngestionLedger
     control_events: ControlEventStore
     artifacts: ArtifactCatalog
     runner_sessions: RunnerSessionStore

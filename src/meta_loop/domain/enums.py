@@ -42,3 +42,4 @@ class EventType(str, Enum):
     RUNNER_SESSION_REQUESTED = "runner_session_requested"
     WORKSPACE_ALLOCATED = "workspace_allocated"
     WORKSPACE_RELEASED = "workspace_released"
+    SOURCE_INGESTED = "source_ingested"

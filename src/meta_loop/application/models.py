@@ -50,6 +50,20 @@ class IntakeRecord:
 
 
 @dataclass(frozen=True)
+class IssueIngestionRecord:
+    source_key: str
+    canonical_request: str
+    task_id: str
+    trigger_event_id: str
+
+
+@dataclass(frozen=True)
+class IssueIngestionReceipt:
+    task_id: str
+    created: bool
+
+
+@dataclass(frozen=True)
 class ControlEvent:
     action: str
     occurred_at: datetime

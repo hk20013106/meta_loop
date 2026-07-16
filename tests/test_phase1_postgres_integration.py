@@ -15,11 +15,13 @@ if not DSN:
 psycopg = pytest.importorskip("psycopg")
 
 from meta_loop.application.models import QueueEnqueueResult
+from meta_loop.application.ingestion import IssueCandidate, IssueIngestionService, IssueTaskSpec
 from meta_loop.application.runners import RunnerSessionRequest, RunnerSessionService
 from meta_loop.application.models import WorkspacePurpose, WorkspaceRequest
 from meta_loop.application.workspaces import FakeWorkspaceManager, WorkspaceAllocationService
 from meta_loop.application.services import TaskQueueService
 from meta_loop.infrastructure.memory import FixedClock, SequentialIdGenerator
+from meta_loop.infrastructure.cas import FilesystemArtifactStore
 from meta_loop.domain.enums import EventType, RiskClass, Role, TaskStatus
 from meta_loop.domain.errors import IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
@@ -46,7 +48,7 @@ def migrated_database():
 def isolate_disposable_database():
     """The disposable test user is privileged; runtime adapters never truncate events."""
     with connection() as db, db.cursor() as cursor:
-        cursor.execute("TRUNCATE workspace_allocations, task_events, task_queue, tasks CASCADE")
+        cursor.execute("TRUNCATE source_ingestions, workspace_allocations, task_events, task_queue, tasks CASCADE")
         db.commit()
 
 
@@ -304,6 +306,24 @@ def test_uncommitted_workspace_allocation_rolls_back_ledger_and_event():
     with PostgresUnitOfWork(connection) as uow:
         assert uow.tasks.get(task.task_id) is None
         assert uow.workspaces.get(request.allocation_id) is None
+
+
+def test_issue_ingestion_ledger_task_artifact_and_events_share_a_postgres_uow(tmp_path):
+    candidate = IssueCandidate("github", "github:repository:17", "owner/repository#17", "event-17", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Update", ("tests pass",), "a" * 40, RiskClass.R1))
+    service = IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"))
+    with PostgresUnitOfWork(connection) as uow:
+        receipt = service.ingest(uow, candidate)
+        uow.commit()
+    with PostgresUnitOfWork(connection) as uow:
+        assert not service.ingest(uow, candidate).created
+        assert uow.source_ingestions.get(candidate.source_key).task_id == receipt.task_id
+        assert len(uow.events.read(receipt.task_id)) == 3
+
+    rollback = IssueCandidate("github", "github:repository:18", "owner/repository#18", "event-18", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Rollback", ("tests pass",), "b" * 40, RiskClass.R1))
+    with PostgresUnitOfWork(connection) as uow:
+        service.ingest(uow, rollback)
+    with PostgresUnitOfWork(connection) as uow:
+        assert uow.source_ingestions.get(rollback.source_key) is None
 
 
 def test_postgres_workspace_ledger_rejects_another_active_task_purpose():

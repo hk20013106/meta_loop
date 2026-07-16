@@ -90,3 +90,12 @@
 - **Consequences:** requests carry a fixed commit SHA rather than a branch or
   path; local roots are explicitly allowlisted; R3 is proposal-only and
   read-only; implementation allocation requires governance and fails closed.
+
+## ADR-009 — GitHub REST Issue ingestion
+
+- **Decision:** Phase 7 uses bounded GitHub REST reconciliation, not a webhook
+  server. A configured label event by the configured trigger authority is the
+  only intake trigger.
+- **Consequences:** Issue bodies are strict schema-v1 source artifacts; API
+  metadata supplies identity and trigger facts; missing configuration or
+  unverifiable source state fails closed.

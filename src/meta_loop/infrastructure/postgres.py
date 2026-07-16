@@ -4,10 +4,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest, WorkspaceState
+from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest, WorkspaceState
 from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
 from meta_loop.domain.enums import EventType, Role, TaskStatus
-from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError
+from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, TaskNotFoundError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
 from meta_loop.serialization.codecs import event_to_dict, task_from_dict, task_to_dict
@@ -195,6 +195,32 @@ class PostgresIntakeLedger:
         return record
 
 
+class PostgresSourceIngestionLedger:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def get(self, source_key: str) -> IssueIngestionRecord | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT canonical_request, task_id, trigger_event_id FROM source_ingestions WHERE source_key = %s", (source_key,))
+            row = cursor.fetchone()
+        return None if row is None else IssueIngestionRecord(source_key, row[0] if isinstance(row[0], str) else _canonical(row[0]), row[1], row[2])
+
+    def record_once(self, record: IssueIngestionRecord) -> tuple[IssueIngestionRecord, bool]:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT canonical_request, task_id, trigger_event_id FROM source_ingestions WHERE source_key = %s FOR UPDATE", (record.source_key,))
+            row = cursor.fetchone()
+            if row is not None:
+                existing = IssueIngestionRecord(record.source_key, row[0] if isinstance(row[0], str) else _canonical(row[0]), row[1], row[2])
+                if existing != record:
+                    raise IdempotencyConflictError("source has conflicting canonical content")
+                return existing, False
+            try:
+                cursor.execute("INSERT INTO source_ingestions (source_key, task_id, trigger_event_id, canonical_request, schema_version) VALUES (%s, %s, %s, %s::jsonb, 1)", (record.source_key, record.task_id, record.trigger_event_id, record.canonical_request))
+            except Exception as error:
+                raise IdempotencyConflictError("source ingestion conflicts with an existing trigger") from error
+        return record, True
+
+
 class PostgresControlEventStore:
     def __init__(self, connection: object) -> None:
         self._connection = connection
@@ -371,6 +397,7 @@ class PostgresUnitOfWork:
         self.queue = PostgresTaskQueue(self._connection)
         self.fuse = PostgresFuseStore(self._connection)
         self.intake_ledger = PostgresIntakeLedger(self._connection)
+        self.source_ingestions = PostgresSourceIngestionLedger(self._connection)
         self.control_events = PostgresControlEventStore(self._connection)
         self.artifacts = PostgresArtifactCatalog(self._connection)
         self.runner_sessions = PostgresRunnerSessionStore(self._connection)

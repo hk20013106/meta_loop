@@ -3,7 +3,10 @@
 import os
 from pathlib import Path
 
+from meta_loop.application.ingestion import IssueIngestionService
 from meta_loop.domain.errors import UnsupportedGovernanceError
+from meta_loop.infrastructure.cas import FilesystemArtifactStore
+from meta_loop.infrastructure.github import GitHubIssueSource, UrllibJsonTransport
 from meta_loop.infrastructure.migrations import MigrationRunner
 from meta_loop.infrastructure.postgres import PostgresUnitOfWork
 
@@ -30,8 +33,22 @@ def unit_of_work() -> PostgresUnitOfWork:
     return PostgresUnitOfWork(connect)
 
 
+def github_issue_source() -> GitHubIssueSource:
+    required = {name: os.environ.get(name) for name in ("META_LOOP_GITHUB_ORG", "META_LOOP_GITHUB_REPO", "META_LOOP_GITHUB_PAT", "META_LOOP_TRIGGER_AUTHOR", "META_LOOP_TRIGGER_LABEL")}
+    if not all(required.values()):
+        raise ValueError("GitHub Issue ingestion is not configured")
+    return GitHubIssueSource(required["META_LOOP_GITHUB_ORG"] + "/" + required["META_LOOP_GITHUB_REPO"], required["META_LOOP_TRIGGER_AUTHOR"], required["META_LOOP_TRIGGER_LABEL"], UrllibJsonTransport(required["META_LOOP_GITHUB_PAT"]))
+
+
+def github_ingestion_service() -> IssueIngestionService:
+    root = os.environ.get("META_LOOP_CAS_ROOT")
+    if not root:
+        raise ValueError("META_LOOP_CAS_ROOT is not configured")
+    return IssueIngestionService(FilesystemArtifactStore(root, Path(__file__).parents[3]), __import__("meta_loop.cli.main", fromlist=["SystemClock"]).SystemClock(), __import__("meta_loop.infrastructure.memory", fromlist=["SequentialIdGenerator"]).SequentialIdGenerator("github"))
+
+
 def doctor() -> dict[str, object]:
-    result: dict[str, object] = {"database": "not configured", "migrations": "not checked", "governance": "unavailable"}
+    result: dict[str, object] = {"database": "not configured", "migrations": "not checked", "governance": "unavailable", "github": "configured" if all(os.environ.get(name) for name in ("META_LOOP_GITHUB_ORG", "META_LOOP_GITHUB_REPO", "META_LOOP_GITHUB_PAT", "META_LOOP_TRIGGER_AUTHOR", "META_LOOP_TRIGGER_LABEL")) else "not configured"}
     try:
         import psycopg
         with psycopg.connect(dsn()) as connection, connection.cursor() as cursor:
