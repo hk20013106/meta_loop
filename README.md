@@ -1,8 +1,9 @@
-# Meta Loop — Phase 0–1B Baseline
+# Meta Loop — Phase 0–6 Baseline
 
-This directory is the independent `meta_loop` system through **Phase 1B**.
-It contains the Phase 0 boundary, Phase 1A domain model and ports, and Phase
-1B PostgreSQL persistence/queue adapter. Phase 2+ runtime behavior remains
+This directory is the independent `meta_loop` system through **Phase 6**.
+It contains the Phase 0 boundary, the Phase 1 domain/persistence baseline,
+the local controller, CAS, fake runner/worker protocols, and managed Git
+worktree boundary. Phase 7+ GitHub and publication runtime behavior remains
 out of scope.
 
 ## Boundary model
@@ -27,21 +28,27 @@ governance_root/    # separate governance location (NOT created in Phase 0; see 
 2. A pure, versioned task/event domain with fail-closed governance transitions.
 3. In-memory and PostgreSQL UoW adapters, append-only events, optimistic task
    versioning, and a `FOR UPDATE SKIP LOCKED` queue.
-4. A `.env.example` with explicit placeholders only (no real PAT / DSN / key).
-5. Boundary and disposable-database tests that prove:
+4. Controller/CLI intake and fuse controls, a local SHA-256 CAS/catalog, and
+   provider-neutral runner, worker and workspace ledgers.
+5. An opt-in local Git worktree adapter with fixed-SHA, allowlist and
+   read-only/R3 protections; its default contract adapter is deterministic and
+   filesystem-free.
+6. A `.env.example` with explicit placeholders only (no real PAT / DSN / key).
+7. Boundary and disposable-database tests that prove:
    - `meta_loop` imports without pulling in `research_loop`;
    - `meta_loop` is a sibling directory, not a child of `research_loop`;
    - `.env.example` contains no real secrets;
-   - no later-phase runtime symbols are present.
+   - no GitHub, PR, CI, merge or production runtime is present.
 
-## Excluded capabilities (Phase 2+)
+## Excluded capabilities (Phase 7+)
 
-No controller/CLI, CAS, Hermes session protocol, GitHub Issue/PR automation,
-auto-merge, governance-policy authoring, or production deployment is present.
+No GitHub Issue ingestion, PR publication, CI integration, auto-merge,
+governance-policy authoring, real Hermes execution, or production deployment
+is present.
 
 ## Configuration boundaries
 
 - **GitHub org / repo / identity**: placeholders only. No GitHub runtime is
-  implemented in this baseline.
+  implemented through Phase 6.
 - **PostgreSQL DSN**: placeholder only; no real credentials.
 - **governance_root location**: separate boundary, not created in Phase 0.
