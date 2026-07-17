@@ -1,5 +1,6 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
@@ -22,6 +23,13 @@ class SequentialIdGenerator:
     def new(self) -> str:
         self._number += 1
         return f"{self._prefix}-{self._number}"
+
+
+class UUIDIdGenerator:
+    """Runtime-safe event identifiers; deterministic IDs remain test-only."""
+
+    def new(self) -> str:
+        return str(uuid4())
 
 
 class InMemoryTaskRepository:
@@ -153,6 +161,8 @@ class InMemoryFuseStore:
 
     def get(self) -> FuseState:
         return self._state["value"]
+    def locked_get(self) -> FuseState:
+        return self.get()
 
     def set(self, state: FuseState) -> FuseState:
         self._state["value"] = state
@@ -177,14 +187,20 @@ class InMemoryIntakeLedger:
 class InMemorySourceIngestionLedger:
     def __init__(self, records: dict[str, IssueIngestionRecord]) -> None:
         self._records = records
+    def reserve(self, source_key: str, trigger_event_id: str) -> None:
+        return None
     def get(self, source_key: str) -> IssueIngestionRecord | None:
         return self._records.get(source_key)
+    def get_by_trigger_event(self, trigger_event_id: str) -> IssueIngestionRecord | None:
+        return next((record for record in self._records.values() if record.trigger_event_id == trigger_event_id), None)
     def record_once(self, record: IssueIngestionRecord) -> tuple[IssueIngestionRecord, bool]:
         current = self._records.get(record.source_key)
         if current is not None:
             if current != record:
                 raise IdempotencyConflictError("source has conflicting canonical content")
             return current, False
+        if self.get_by_trigger_event(record.trigger_event_id) is not None:
+            raise IdempotencyConflictError("trigger event is already associated with another source")
         self._records[record.source_key] = record
         return record, True
 

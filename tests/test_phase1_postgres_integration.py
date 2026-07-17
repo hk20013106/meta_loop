@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ if not DSN:
 psycopg = pytest.importorskip("psycopg")
 
 from meta_loop.application.models import QueueEnqueueResult
+from meta_loop.application.controller import FuseService
 from meta_loop.application.ingestion import IssueCandidate, IssueIngestionService, IssueTaskSpec
 from meta_loop.application.runners import RunnerSessionRequest, RunnerSessionService
 from meta_loop.application.models import WorkspacePurpose, WorkspaceRequest
@@ -31,6 +33,14 @@ from meta_loop.infrastructure.postgres import PostgresUnitOfWork
 
 
 NOW = datetime(2026, 7, 13, tzinfo=UTC)
+
+
+class AllowIssueIngestionGovernance:
+    def read_revision(self, revision):
+        assert revision == "gov-7"
+
+    def authorize(self, revision, capability):
+        return revision == "gov-7" and capability == "github_issue_ingestion"
 
 
 def connection():
@@ -310,7 +320,7 @@ def test_uncommitted_workspace_allocation_rolls_back_ledger_and_event():
 
 def test_issue_ingestion_ledger_task_artifact_and_events_share_a_postgres_uow(tmp_path):
     candidate = IssueCandidate("github", "github:repository:17", "owner/repository#17", "event-17", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Update", ("tests pass",), "a" * 40, RiskClass.R1))
-    service = IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"))
+    service = IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"), AllowIssueIngestionGovernance(), "gov-7")
     with PostgresUnitOfWork(connection) as uow:
         receipt = service.ingest(uow, candidate)
         uow.commit()
@@ -324,6 +334,69 @@ def test_issue_ingestion_ledger_task_artifact_and_events_share_a_postgres_uow(tm
         service.ingest(uow, rollback)
     with PostgresUnitOfWork(connection) as uow:
         assert uow.source_ingestions.get(rollback.source_key) is None
+
+
+def test_same_source_concurrent_ingestion_serializes_to_duplicate_and_preserves_drift(tmp_path):
+    candidate = IssueCandidate("github", "github:repository:19", "owner/repository#19", "event-19", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Update", ("tests pass",), "a" * 40, RiskClass.R1))
+
+    def ingest() -> object:
+        service = IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"), AllowIssueIngestionGovernance(), "gov-7")
+        with PostgresUnitOfWork(connection) as uow:
+            receipt = service.ingest(uow, candidate)
+            uow.commit()
+            return receipt
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(executor.map(lambda _: ingest(), range(2)))
+
+    assert {receipt.task_id for receipt in receipts} == {receipts[0].task_id}
+    assert sorted(receipt.created for receipt in receipts) == [False, True]
+    changed = IssueCandidate("github", candidate.source_key, candidate.source_reference, candidate.trigger_event_id, candidate.trigger_actor, candidate.trigger_label, candidate.occurred_at, IssueTaskSpec("Changed", ("tests pass",), "a" * 40, RiskClass.R1))
+    with PostgresUnitOfWork(connection) as uow, pytest.raises(IdempotencyConflictError, match="source"):
+        IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"), AllowIssueIngestionGovernance(), "gov-7").ingest(uow, changed)
+
+
+def test_same_trigger_concurrent_ingestion_rejects_before_second_task_creation(tmp_path):
+    first = IssueCandidate("github", "github:repository:20", "owner/repository#20", "event-shared", "kai", "meta-loop:ready", NOW, IssueTaskSpec("First", ("tests pass",), "a" * 40, RiskClass.R1))
+    second = IssueCandidate("github", "github:repository:21", "owner/repository#21", "event-shared", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Second", ("tests pass",), "a" * 40, RiskClass.R1))
+
+    def ingest(candidate) -> str:
+        try:
+            with PostgresUnitOfWork(connection) as uow:
+                IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"), AllowIssueIngestionGovernance(), "gov-7").ingest(uow, candidate)
+                uow.commit()
+            return "created"
+        except IdempotencyConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert sorted(executor.map(ingest, (first, second))) == ["conflict", "created"]
+    with PostgresUnitOfWork(connection) as uow:
+        assert len(uow.tasks.list()) == 1
+
+
+def test_committed_fuse_engage_blocks_interleaved_issue_ingestion(tmp_path):
+    candidate = IssueCandidate("github", "github:repository:22", "owner/repository#22", "event-22", "kai", "meta-loop:ready", NOW, IssueTaskSpec("Blocked", ("tests pass",), "a" * 40, RiskClass.R1))
+    barrier = Barrier(2)
+
+    def engage() -> None:
+        with PostgresUnitOfWork(connection) as uow:
+            FuseService().engage(uow, NOW)
+            barrier.wait()
+            uow.commit()
+
+    def ingest() -> str:
+        barrier.wait()
+        try:
+            with PostgresUnitOfWork(connection) as uow:
+                IssueIngestionService(FilesystemArtifactStore(tmp_path / "cas"), FixedClock(NOW), SequentialIdGenerator("phase7"), AllowIssueIngestionGovernance(), "gov-7").ingest(uow, candidate)
+                uow.commit()
+        except ValidationError:
+            return "blocked"
+        return "created"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert set(executor.map(lambda fn: fn(), (engage, ingest))) == {None, "blocked"}
 
 
 def test_postgres_workspace_ledger_rejects_another_active_task_purpose():

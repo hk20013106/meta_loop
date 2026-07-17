@@ -1,6 +1,8 @@
 """Argparse-only local CLI; no external command execution."""
 
 import argparse
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import sys
 from pathlib import Path
@@ -9,19 +11,45 @@ from meta_loop.application.controller import FuseService, IntakeRequest, TaskInt
 from meta_loop.cli.runtime import UnavailableGovernance, doctor, github_ingestion_service, github_issue_source, unit_of_work
 from meta_loop.domain.enums import RiskClass, TaskStatus
 from meta_loop.domain.errors import DomainError, IdempotencyConflictError, TaskNotFoundError
-from meta_loop.infrastructure.memory import SequentialIdGenerator
+from meta_loop.infrastructure.memory import UUIDIdGenerator
 from datetime import datetime, timezone
 
 
-def _emit(value: dict, as_json: bool) -> None:
+class _ParseError(Exception):
+    pass
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ParseError()
+
+
+def _emit(value: dict, as_json: bool, command: str) -> None:
     if as_json:
-        print(json.dumps({"schema_version": 1, **value}, sort_keys=True, default=str))
+        print(json.dumps({"command": command, "ok": True, "result": value, "schema_version": 1}, sort_keys=True, default=str))
     else:
         print("\n".join(f"{key}: {value[key]}" for key in sorted(value)))
 
 
+def _error(as_json: bool, command: str, error: Exception, details: dict | None = None) -> int:
+    if isinstance(error, IdempotencyConflictError):
+        code = "idempotency_conflict"
+    elif isinstance(error, (OSError, ValueError, KeyError, DomainError, TaskNotFoundError)):
+        code = "rejected"
+    else:
+        code = "operation_failed"
+    if as_json:
+        payload = {"code": code, "message": "operation was not completed"}
+        if details:
+            payload.update(details)
+        print(json.dumps({"command": command, "error": payload, "ok": False, "schema_version": 1}, sort_keys=True))
+    else:
+        print("meta-loop: operation was not completed", file=sys.stderr)
+    return 2 if code != "operation_failed" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="meta-loop")
+    parser = _SafeArgumentParser(prog="meta-loop")
     sub = parser.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); doctor.add_argument("--json", action="store_true")
     start = sub.add_parser("start"); start.add_argument("--request", required=True); start.add_argument("--enqueue", action="store_true"); start.add_argument("--priority", type=int, default=0); start.add_argument("--json", action="store_true")
@@ -51,42 +79,61 @@ def _task_summary(task, events=()) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.command == "doctor":
-        _emit({"status": "ok", **doctor()}, args.json)
-        return 0
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    json_mode = "--json" in arguments
     try:
+        if json_mode:
+            with redirect_stderr(StringIO()):
+                args = build_parser().parse_args(arguments)
+        else:
+            args = build_parser().parse_args(arguments)
+    except _ParseError:
+        return _error(json_mode, _raw_command(arguments), ValueError("invalid command arguments"))
+    except SystemExit:
+        if not json_mode:
+            raise
+        command = _raw_command(arguments)
+        return _error(True, command, ValueError("invalid command arguments"))
+    try:
+        if args.command == "doctor":
+            _emit({"status": "ok", **doctor()}, args.json, "doctor")
+            return 0
         if args.command == "start":
             request = request_from_json(args.request, args.enqueue, args.priority)
             with unit_of_work() as uow:
-                task = TaskIntakeService(SystemClock(), SequentialIdGenerator("event")).start(uow, request)
+                task = TaskIntakeService(SystemClock(), UUIDIdGenerator()).start(uow, request)
                 uow.commit()
-            _emit(_task_summary(task), args.json)
+            _emit(_task_summary(task), args.json, "start")
             return 0
         if args.command == "status":
             with unit_of_work() as uow:
                 task, events = TaskQueryService().status(uow, args.task_id)
-            _emit(_task_summary(task, events), args.json)
+            _emit(_task_summary(task, events), args.json, "status")
             return 0
         if args.command == "tasks":
             status = TaskStatus(args.status) if args.status else None
             risk = RiskClass(args.risk) if args.risk else None
             with unit_of_work() as uow:
                 values = TaskQueryService().tasks(uow, status, risk)
-            _emit({"tasks": [_task_summary(task) for task in values]}, args.json)
+            _emit({"tasks": [_task_summary(task) for task in values]}, args.json, "tasks")
             return 0
         if args.command == "github":
-            service, outcomes = github_ingestion_service(), []
-            for candidate in github_issue_source().scan(args.limit):
-                try:
-                    with unit_of_work() as uow:
-                        receipt = service.ingest(uow, candidate)
-                        uow.commit()
-                    outcomes.append({"source_key": candidate.source_key, "task_id": receipt.task_id, "status": "ingested" if receipt.created else "duplicate"})
-                except IdempotencyConflictError:
-                    outcomes.append({"source_key": candidate.source_key, "status": "conflict"})
-            _emit({"results": outcomes}, args.json)
-            return 2 if any(value["status"] == "conflict" for value in outcomes) else 0
+            try:
+                service, outcomes = github_ingestion_service(), []
+                for candidate in github_issue_source().scan(args.limit):
+                    try:
+                        with unit_of_work() as uow:
+                            receipt = service.ingest(uow, candidate)
+                            uow.commit()
+                        outcomes.append({"source_key": candidate.source_key, "task_id": receipt.task_id, "status": "ingested" if receipt.created else "duplicate"})
+                    except IdempotencyConflictError:
+                        outcomes.append({"source_key": candidate.source_key, "status": "conflict"})
+                if any(value["status"] == "conflict" for value in outcomes):
+                    return _error(args.json, "github.sync", IdempotencyConflictError("GitHub sync has source conflicts"), {"results": outcomes})
+                _emit({"results": outcomes}, args.json, "github.sync")
+                return 0
+            except Exception as error:
+                return _error(args.json, "github.sync", error)
         with unit_of_work() as uow:
             service, clock = FuseService(), SystemClock()
             if args.action == "status":
@@ -97,11 +144,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 state = service.release(uow, clock.now(), UnavailableGovernance(), args.governance_revision)
                 uow.commit()
-            _emit({"engaged": state.engaged, "changed_at": state.changed_at.isoformat(), "governance_revision": state.governance_revision}, args.json)
+            _emit({"engaged": state.engaged, "changed_at": state.changed_at.isoformat(), "governance_revision": state.governance_revision}, args.json, f"fuse.{args.action}")
         return 0
     except (OSError, ValueError, KeyError, DomainError, TaskNotFoundError) as error:
-        print(f"meta-loop: {error}", file=sys.stderr)
-        return 2
-    except Exception:
-        print("meta-loop: operation failed", file=sys.stderr)
-        return 1
+        return _error(args.json, args.command, error)
+    except Exception as error:
+        return _error(args.json, args.command, error)
+
+
+def _raw_command(arguments: list[str]) -> str:
+    for index, value in enumerate(arguments):
+        if value == "github":
+            return "github.sync" if index + 1 < len(arguments) and arguments[index + 1] == "sync" else "github"
+        if value in {"doctor", "start", "status", "tasks", "fuse"}:
+            return value
+    return "unknown"

@@ -4,6 +4,11 @@ import json
 from datetime import datetime, timedelta
 from typing import Callable
 
+try:
+    from psycopg.errors import UniqueViolation
+except ImportError:  # psycopg is optional outside PostgreSQL integration tests.
+    UniqueViolation = ()
+
 from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerIdentity, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest, WorkspaceState
 from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
 from meta_loop.domain.enums import EventType, Role, TaskStatus
@@ -167,6 +172,14 @@ class PostgresFuseStore:
             row = cursor.fetchone()
         return FuseState(row[0], row[1], row[2])
 
+    def locked_get(self) -> FuseState:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT engaged, changed_at, governance_revision FROM system_fuse WHERE singleton = TRUE FOR UPDATE")
+            row = cursor.fetchone()
+        if row is None:
+            raise ValidationError("system fuse bootstrap row is missing")
+        return FuseState(row[0], row[1], row[2])
+
     def set(self, state: FuseState) -> FuseState:
         with self._connection.cursor() as cursor:
             cursor.execute("UPDATE system_fuse SET engaged = %s, changed_at = %s, governance_revision = %s WHERE singleton = TRUE", (state.engaged, state.changed_at, state.governance_revision))
@@ -199,11 +212,22 @@ class PostgresSourceIngestionLedger:
     def __init__(self, connection: object) -> None:
         self._connection = connection
 
+    def reserve(self, source_key: str, trigger_event_id: str) -> None:
+        with self._connection.cursor() as cursor:
+            for value in sorted(("source:" + source_key, "trigger:" + trigger_event_id)):
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (value,))
+
     def get(self, source_key: str) -> IssueIngestionRecord | None:
         with self._connection.cursor() as cursor:
             cursor.execute("SELECT canonical_request, task_id, trigger_event_id FROM source_ingestions WHERE source_key = %s", (source_key,))
             row = cursor.fetchone()
         return None if row is None else IssueIngestionRecord(source_key, row[0] if isinstance(row[0], str) else _canonical(row[0]), row[1], row[2])
+
+    def get_by_trigger_event(self, trigger_event_id: str) -> IssueIngestionRecord | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT source_key, canonical_request, task_id, trigger_event_id FROM source_ingestions WHERE trigger_event_id = %s", (trigger_event_id,))
+            row = cursor.fetchone()
+        return None if row is None else IssueIngestionRecord(row[0], row[1] if isinstance(row[1], str) else _canonical(row[1]), row[2], row[3])
 
     def record_once(self, record: IssueIngestionRecord) -> tuple[IssueIngestionRecord, bool]:
         with self._connection.cursor() as cursor:
@@ -216,7 +240,7 @@ class PostgresSourceIngestionLedger:
                 return existing, False
             try:
                 cursor.execute("INSERT INTO source_ingestions (source_key, task_id, trigger_event_id, canonical_request, schema_version) VALUES (%s, %s, %s, %s::jsonb, 1)", (record.source_key, record.task_id, record.trigger_event_id, record.canonical_request))
-            except Exception as error:
+            except UniqueViolation as error:
                 raise IdempotencyConflictError("source ingestion conflicts with an existing trigger") from error
         return record, True
 
