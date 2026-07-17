@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from meta_loop.application.models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
+from meta_loop.application.models import CatalogedArtifact, CheckRunObservation, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, PublicationEffectIntent, PublicationEffectRecord, PublicationEffectState, PublicationIntent, PublicationReceipt, PublicationRecord, PublicationReviewDecision, PreparedHead, PublicationState, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, RunnerSessionState, VerificationResult, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceState
 from meta_loop.domain.errors import CreateConflictError, IdempotencyConflictError, LeaseLostError, OptimisticConflictError, SequenceConflictError, ValidationError
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import Task
@@ -306,6 +306,164 @@ class InMemoryWorkspaceLedger:
         return released
 
 
+class InMemoryPublicationLedger:
+    def __init__(self, records: dict[str, PublicationRecord], tasks: dict[str, Task], artifacts: dict[str, CatalogedArtifact], worker_results: dict[str, WorkerResult], runner_sessions: dict[str, RunnerSessionRecord]) -> None:
+        self._records = records
+        self._tasks = tasks
+        self._artifacts = artifacts
+        self._worker_results = worker_results
+        self._runner_sessions = runner_sessions
+
+    def _validate_references(self, intent: PublicationIntent) -> None:
+        task = self._tasks.get(intent.task_id)
+        artifact = self._artifacts.get(intent.patch_digest)
+        result = self._worker_results.get(intent.worker_result_id)
+        session = None if result is None else self._runner_sessions.get(result.session_id)
+        if task is None or task.repository.name != intent.repository_name or task.status.value != "ready_to_publish" or task.version != intent.expected_task_version:
+            raise ValidationError("publication task reference is invalid")
+        if artifact is None or artifact.reference not in task.artifacts or artifact.reference.media_type != "text/x-diff" or artifact.source_kind != f"worker_result:{intent.worker_result_id}":
+            raise ValidationError("publication patch artifact reference is invalid")
+        if result is None or session is None or result.task_id != intent.task_id or result.worker.role.value != "implementer" or session.request.task_id != intent.task_id or session.request.role.value != "implementer" or session.state is not RunnerSessionState.SUCCEEDED:
+            raise ValidationError("publication worker result reference is invalid")
+
+    def reserve(self, intent: PublicationIntent) -> tuple[PublicationRecord, bool]:
+        current = self._records.get(intent.publication_id)
+        if current is not None:
+            if current.intent.canonical() != intent.canonical():
+                raise IdempotencyConflictError("publication id has conflicting canonical input")
+            return current, False
+        self._validate_references(intent)
+        record = PublicationRecord(intent)
+        self._records[intent.publication_id] = record
+        return record, True
+
+    def get(self, publication_id: str) -> PublicationRecord | None:
+        return self._records.get(publication_id)
+
+    def record_prepared(self, prepared: PreparedHead, expected_version: int) -> PublicationRecord:
+        current = self._records.get(prepared.publication_id)
+        if current is None or current.version != expected_version or current.state is not PublicationState.RESERVED:
+            raise OptimisticConflictError("publication version does not match")
+        if current.intent.patch_digest != prepared.patch_digest or current.intent.base_sha != prepared.base_sha:
+            raise IdempotencyConflictError("prepared head conflicts with immutable publication input")
+        updated = PublicationRecord(current.intent, PublicationState.PREPARED, current.version + 1, prepared)
+        self._records[prepared.publication_id] = updated
+        return updated
+
+    def record_verification(self, verification: VerificationResult, expected_version: int) -> PublicationRecord:
+        current = self._records.get(verification.publication_id)
+        if current is None or current.version != expected_version or current.state is not PublicationState.PREPARED or current.prepared_head is None:
+            raise OptimisticConflictError("publication version does not match")
+        if current.prepared_head.head_sha != verification.head_sha:
+            raise IdempotencyConflictError("verification head conflicts with prepared head")
+        updated = PublicationRecord(current.intent, PublicationState.VERIFIED, current.version + 1, current.prepared_head, verification)
+        self._records[verification.publication_id] = updated
+        return updated
+
+
+class InMemoryPublicationApprovalStore:
+    def __init__(self, records: dict[str, PublicationReviewDecision], publications: dict[str, PublicationRecord], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult]) -> None:
+        self._records = records
+        self._publications = publications
+        self._artifacts = artifacts
+        self._runner_sessions = runner_sessions
+        self._worker_results = worker_results
+
+    def append(self, decision: PublicationReviewDecision) -> tuple[PublicationReviewDecision, bool]:
+        current = self._records.get(decision.approval_id)
+        if current is not None:
+            if current.canonical() != decision.canonical():
+                raise IdempotencyConflictError("approval id has conflicting content")
+            return current, False
+        publication = self._publications.get(decision.publication_id)
+        artifact = self._artifacts.get(decision.approval_artifact.digest.value)
+        session = self._runner_sessions.get(decision.session_id)
+        result = self._worker_results.get(decision.result_id)
+        if publication is None or publication.prepared_head is None or publication.state is not PublicationState.VERIFIED or publication.verification is None or publication.verification.status.value != "succeeded" or artifact is None or session is None or result is None:
+            raise ValidationError("publication approval references are invalid")
+        prepared = publication.prepared_head
+        if (publication.intent.task_id != decision.task_id or publication.intent.patch_digest != decision.patch_digest
+                or prepared.base_sha != decision.base_sha or prepared.tree_sha != decision.tree_sha
+                or prepared.head_sha != decision.head_sha):
+            raise IdempotencyConflictError("approval does not match exact publication head")
+        if session.request.task_id != decision.task_id or session.request.role.value != "patch_reviewer" or session.state is not RunnerSessionState.SUCCEEDED or result.task_id != decision.task_id or result.session_id != decision.session_id or result.worker.role.value != "patch_reviewer" or result.worker.worker_id != decision.reviewer_id:
+            raise IdempotencyConflictError("approval reviewer result is not a successful patch reviewer result")
+        self._records[decision.approval_id] = decision
+        return decision, True
+
+    def read(self, publication_id: str, head_sha: str) -> tuple[PublicationReviewDecision, ...]:
+        return tuple(record for record in self._records.values() if record.publication_id == publication_id and record.head_sha == head_sha)
+
+
+class InMemoryPublicationEffectStore:
+    def __init__(self, records: dict[str, PublicationEffectRecord], publications: dict[str, PublicationRecord], approvals: dict[str, PublicationReviewDecision]) -> None:
+        self._records = records
+        self._publications = publications
+        self._approvals = approvals
+
+    def request(self, intent: PublicationEffectIntent) -> tuple[PublicationEffectRecord, bool]:
+        current = self._records.get(intent.effect_id)
+        if current is not None:
+            if current.intent.canonical() != intent.canonical():
+                raise IdempotencyConflictError("publication effect id has conflicting input")
+            return current, False
+        publication = self._publications.get(intent.publication_id)
+        has_approval = any(value.publication_id == intent.publication_id and value.head_sha == intent.head_sha and value.decision.value == "approved" for value in self._approvals.values())
+        if publication is None or publication.prepared_head is None or publication.verification is None or publication.verification.status.value != "succeeded" or publication.prepared_head.head_sha != intent.head_sha or publication.prepared_head.deterministic_ref != intent.deterministic_ref or not has_approval:
+            raise IdempotencyConflictError("publication effect does not match exact publication head")
+        if any(value.intent.publication_id == intent.publication_id and value.intent.deterministic_ref == intent.deterministic_ref for value in self._records.values()):
+            raise IdempotencyConflictError("publication deterministic ref already has an effect intent")
+        record = PublicationEffectRecord(intent)
+        self._records[intent.effect_id] = record
+        return record, True
+
+    def get(self, effect_id: str) -> PublicationEffectRecord | None:
+        return self._records.get(effect_id)
+
+    def reconcile(self, receipt: PublicationReceipt) -> PublicationEffectRecord:
+        current = self._records.get(receipt.effect_id)
+        if current is None or current.intent.publication_id != receipt.publication_id:
+            raise ValidationError("publication effect does not exist")
+        if receipt.state is not PublicationEffectState.RECONCILED:
+            raise IdempotencyConflictError("publication receipt must be reconciled")
+        publication = self._publications.get(receipt.publication_id)
+        if publication is None or publication.prepared_head is None or receipt.pull_request is None:
+            raise IdempotencyConflictError("publication receipt does not match exact prepared head")
+        prepared = publication.prepared_head
+        pull_request = receipt.pull_request
+        if pull_request.base_sha != publication.intent.base_sha or pull_request.tree_sha != prepared.tree_sha or pull_request.head_sha != prepared.head_sha:
+            raise IdempotencyConflictError("publication receipt does not match exact prepared head")
+        if current.receipt is not None:
+            if current.receipt.canonical() != receipt.canonical():
+                raise IdempotencyConflictError("publication effect has conflicting receipt")
+            return current
+        updated = PublicationEffectRecord(current.intent, receipt)
+        self._records[receipt.effect_id] = updated
+        return updated
+
+
+class InMemoryCheckRunObservationStore:
+    def __init__(self, records: dict[tuple[str, str, str, datetime], CheckRunObservation], publications: dict[str, PublicationRecord]) -> None:
+        self._records = records
+        self._publications = publications
+
+    def append(self, observation: CheckRunObservation) -> tuple[CheckRunObservation, bool]:
+        key = (observation.publication_id, observation.head_sha, observation.check_name, observation.observed_at)
+        current = self._records.get(key)
+        if current is not None:
+            if current.canonical() != observation.canonical():
+                raise IdempotencyConflictError("check observation has conflicting content")
+            return current, False
+        publication = self._publications.get(observation.publication_id)
+        if publication is None or publication.prepared_head is None or publication.prepared_head.head_sha != observation.head_sha:
+            raise IdempotencyConflictError("check observation does not match exact publication head")
+        self._records[key] = observation
+        return observation, True
+
+    def read(self, publication_id: str, head_sha: str) -> tuple[CheckRunObservation, ...]:
+        return tuple(record for record in self._records.values() if record.publication_id == publication_id and record.head_sha == head_sha)
+
+
 class InMemoryUnitOfWork:
     """Copy-on-write UoW used to prove the same commit boundary as PostgreSQL."""
 
@@ -322,10 +480,14 @@ class InMemoryUnitOfWork:
         self._runner_sessions: dict[str, RunnerSessionRecord] = {}
         self._worker_results: dict[str, WorkerResult] = {}
         self._workspaces: dict[str, WorkspaceRecord] = {}
+        self._publications: dict[str, PublicationRecord] = {}
+        self._publication_approvals: dict[str, PublicationReviewDecision] = {}
+        self._publication_effects: dict[str, PublicationEffectRecord] = {}
+        self._check_observations: dict[tuple[str, str, str, datetime], CheckRunObservation] = {}
         self._committed = False
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces, self._publications, self._publication_approvals, self._publication_effects, self._check_observations)
 
-    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], source_ingestions: dict[str, IssueIngestionRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult], workspaces: dict[str, WorkspaceRecord]) -> None:
+    def _bind(self, tasks: dict[str, Task], events: dict[str, list[Event]], event_ids: dict[str, Event], queue_records: dict[str, _QueueRecord], fuse_state: dict[str, FuseState], intakes: dict[str, IntakeRecord], source_ingestions: dict[str, IssueIngestionRecord], control_events: list[ControlEvent], artifacts: dict[str, CatalogedArtifact], runner_sessions: dict[str, RunnerSessionRecord], worker_results: dict[str, WorkerResult], workspaces: dict[str, WorkspaceRecord], publications: dict[str, PublicationRecord], publication_approvals: dict[str, PublicationReviewDecision], publication_effects: dict[str, PublicationEffectRecord], check_observations: dict[tuple[str, str, str, datetime], CheckRunObservation]) -> None:
         self.tasks = InMemoryTaskRepository()
         self.tasks._tasks = tasks
         self.events = InMemoryEventStore()
@@ -339,6 +501,10 @@ class InMemoryUnitOfWork:
         self.runner_sessions = InMemoryRunnerSessionStore(runner_sessions)
         self.worker_results = InMemoryWorkerResultLedger(worker_results)
         self.workspaces = InMemoryWorkspaceLedger(workspaces)
+        self.publications = InMemoryPublicationLedger(publications, tasks, artifacts, worker_results, runner_sessions)
+        self.publication_approvals = InMemoryPublicationApprovalStore(publication_approvals, publications, artifacts, runner_sessions, worker_results)
+        self.publication_effects = InMemoryPublicationEffectStore(publication_effects, publications, publication_approvals)
+        self.check_observations = InMemoryCheckRunObservationStore(check_observations, publications)
 
     def __enter__(self):
         self._working_tasks = dict(self._tasks)
@@ -353,8 +519,12 @@ class InMemoryUnitOfWork:
         self._working_runner_sessions = dict(self._runner_sessions)
         self._working_worker_results = dict(self._worker_results)
         self._working_workspaces = dict(self._workspaces)
+        self._working_publications = dict(self._publications)
+        self._working_publication_approvals = dict(self._publication_approvals)
+        self._working_publication_effects = dict(self._publication_effects)
+        self._working_check_observations = dict(self._check_observations)
         self._committed = False
-        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_source_ingestions, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results, self._working_workspaces)
+        self._bind(self._working_tasks, self._working_events, self._working_event_ids, self._working_queue_records, self._working_fuse_state, self._working_intakes, self._working_source_ingestions, self._working_control_events, self._working_artifacts, self._working_runner_sessions, self._working_worker_results, self._working_workspaces, self._working_publications, self._working_publication_approvals, self._working_publication_effects, self._working_check_observations)
         return self
 
     def commit(self) -> None:
@@ -364,10 +534,14 @@ class InMemoryUnitOfWork:
         self._runner_sessions = self._working_runner_sessions
         self._worker_results = self._working_worker_results
         self._workspaces = self._working_workspaces
+        self._publications = self._working_publications
+        self._publication_approvals = self._working_publication_approvals
+        self._publication_effects = self._working_publication_effects
+        self._check_observations = self._working_check_observations
         self._committed = True
 
     def rollback(self) -> None:
         self._committed = False
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces)
+        self._bind(self._tasks, self._events, self._event_ids, self._queue_records, self._fuse_state, self._intakes, self._source_ingestions, self._control_events, self._artifacts, self._runner_sessions, self._worker_results, self._workspaces, self._publications, self._publication_approvals, self._publication_effects, self._check_observations)

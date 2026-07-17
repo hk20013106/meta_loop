@@ -4,7 +4,7 @@ from typing import Protocol
 from meta_loop.domain.artifacts import ArtifactRef
 from meta_loop.domain.events import Event
 from meta_loop.domain.task import RepositoryTarget, Task
-from .models import CatalogedArtifact, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest
+from .models import CatalogedArtifact, CheckRunObservation, ControlEvent, FuseState, IntakeRecord, IssueIngestionRecord, Lease, PublicationEffectIntent, PublicationEffectRecord, PublicationIntent, PublicationReceipt, PublicationRecord, PreparedHead, PublicationReviewDecision, QueueCompletionResult, QueueEnqueueResult, QueueFailureResult, RunnerSessionOutcome, RunnerSessionReceipt, RunnerSessionRecord, RunnerSessionRequest, VerificationResult, WorkerResult, WorkerResultReceipt, WorkspaceRecord, WorkspaceRequest
 
 
 class TaskRepository(Protocol):
@@ -98,6 +98,29 @@ class WorkspaceLedger(Protocol):
     def release(self, allocation_id: str) -> WorkspaceRecord: ...
 
 
+class PublicationLedger(Protocol):
+    def reserve(self, intent: PublicationIntent) -> tuple[PublicationRecord, bool]: ...
+    def get(self, publication_id: str) -> PublicationRecord | None: ...
+    def record_prepared(self, prepared: PreparedHead, expected_version: int) -> PublicationRecord: ...
+    def record_verification(self, verification: VerificationResult, expected_version: int) -> PublicationRecord: ...
+
+
+class PublicationApprovalStore(Protocol):
+    def append(self, decision: PublicationReviewDecision) -> tuple[PublicationReviewDecision, bool]: ...
+    def read(self, publication_id: str, head_sha: str) -> tuple[PublicationReviewDecision, ...]: ...
+
+
+class PublicationEffectStore(Protocol):
+    def request(self, intent: PublicationEffectIntent) -> tuple[PublicationEffectRecord, bool]: ...
+    def get(self, effect_id: str) -> PublicationEffectRecord | None: ...
+    def reconcile(self, receipt: PublicationReceipt) -> PublicationEffectRecord: ...
+
+
+class CheckRunObservationStore(Protocol):
+    def append(self, observation: CheckRunObservation) -> tuple[CheckRunObservation, bool]: ...
+    def read(self, publication_id: str, head_sha: str) -> tuple[CheckRunObservation, ...]: ...
+
+
 class UnitOfWork(Protocol):
     tasks: TaskRepository
     events: EventStore
@@ -110,6 +133,10 @@ class UnitOfWork(Protocol):
     runner_sessions: RunnerSessionStore
     worker_results: WorkerResultLedger
     workspaces: WorkspaceLedger
+    publications: PublicationLedger
+    publication_approvals: PublicationApprovalStore
+    publication_effects: PublicationEffectStore
+    check_observations: CheckRunObservationStore
 
     def __enter__(self) -> "UnitOfWork": ...
     def commit(self) -> None: ...

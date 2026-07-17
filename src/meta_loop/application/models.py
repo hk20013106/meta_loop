@@ -257,3 +257,340 @@ class WorkspaceReceipt:
     allocation_id: str
     state: WorkspaceState
     created: bool
+
+
+class PublicationState(str, Enum):
+    RESERVED = "reserved"
+    PREPARED = "prepared"
+    VERIFIED = "verified"
+    PUBLISH_REQUESTED = "publish_requested"
+    PUBLISHED = "published"
+
+
+class VerificationStatus(str, Enum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class VerifierProfile(str, Enum):
+    DEFAULT = "default"
+
+
+class VerificationResultCode(str, Enum):
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    BLOCKED = "blocked"
+
+
+class CheckRunStatus(str, Enum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+
+
+class CheckRunConclusion(str, Enum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+    NEUTRAL = "neutral"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    ACTION_REQUIRED = "action_required"
+
+
+class ReviewDecision(str, Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PublicationEffectState(str, Enum):
+    REQUESTED = "requested"
+    RECONCILED = "reconciled"
+
+
+def _phase8_canonical(value: dict[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _phase8_identifier(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > 128 or not value[0].isalnum() or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-" for character in value):
+        raise ValidationError(f"{label} is invalid")
+
+
+def _phase8_sha(value: str, label: str, length: int = 40) -> None:
+    if not isinstance(value, str) or len(value) != length or any(character not in "0123456789abcdef" for character in value):
+        raise ValidationError(f"{label} is invalid")
+
+
+@dataclass(frozen=True)
+class PublicationIntent:
+    publication_id: str
+    task_id: str
+    worker_result_id: str
+    patch_digest: str
+    repository_name: str
+    base_sha: str
+    expected_task_version: int
+    expected_sequence: int
+    correlation_id: str
+    governance_revision: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        for label, value in (("publication id", self.publication_id), ("task id", self.task_id), ("worker result id", self.worker_result_id), ("correlation id", self.correlation_id), ("governance revision", self.governance_revision)):
+            _phase8_identifier(value, label)
+        if not isinstance(self.repository_name, str) or len(self.repository_name) > 128 or self.repository_name.count("/") != 1 or ".." in self.repository_name or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/" for character in self.repository_name):
+            raise ValidationError("repository name is invalid")
+        _phase8_sha(self.patch_digest, "patch digest", 64)
+        _phase8_sha(self.base_sha, "base SHA")
+        if self.expected_task_version < 0 or self.expected_sequence < 0 or self.schema_version != 1:
+            raise ValidationError("publication intent version is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "task_id": self.task_id, "worker_result_id": self.worker_result_id, "patch_digest": self.patch_digest, "repository_name": self.repository_name, "base_sha": self.base_sha, "expected_task_version": self.expected_task_version, "expected_sequence": self.expected_sequence, "correlation_id": self.correlation_id, "governance_revision": self.governance_revision}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PreparedHead:
+    publication_id: str
+    patch_digest: str
+    base_sha: str
+    tree_sha: str
+    head_sha: str
+    deterministic_ref: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_sha(self.patch_digest, "patch digest", 64)
+        for label, value in (("base SHA", self.base_sha), ("tree SHA", self.tree_sha), ("head SHA", self.head_sha)):
+            _phase8_sha(value, label)
+        if self.deterministic_ref != f"refs/meta-loop/{self.publication_id}" or self.schema_version != 1:
+            raise ValidationError("deterministic ref is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "patch_digest": self.patch_digest, "base_sha": self.base_sha, "tree_sha": self.tree_sha, "head_sha": self.head_sha, "deterministic_ref": self.deterministic_ref}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    publication_id: str
+    head_sha: str
+    verifier_image_digest: str
+    verifier_profile: VerifierProfile
+    status: VerificationStatus
+    result_code: VerificationResultCode
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_sha(self.head_sha, "head SHA")
+        if not isinstance(self.verifier_image_digest, str) or not self.verifier_image_digest.startswith("sha256:"):
+            raise ValidationError("verifier image digest is invalid")
+        _phase8_sha(self.verifier_image_digest.removeprefix("sha256:"), "verifier image digest", 64)
+        if not isinstance(self.verifier_profile, VerifierProfile) or not isinstance(self.status, VerificationStatus) or not isinstance(self.result_code, VerificationResultCode) or self.schema_version != 1:
+            raise ValidationError("verification result is invalid")
+        if (self.status is VerificationStatus.SUCCEEDED) != (self.result_code is VerificationResultCode.PASSED):
+            raise ValidationError("verification status and result code are inconsistent")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "head_sha": self.head_sha, "verifier_image_digest": self.verifier_image_digest, "verifier_profile": self.verifier_profile.value, "status": self.status.value, "result_code": self.result_code.value}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PublicationReviewDecision:
+    approval_id: str
+    publication_id: str
+    task_id: str
+    session_id: str
+    result_id: str
+    approval_artifact: ArtifactRef
+    patch_digest: str
+    base_sha: str
+    tree_sha: str
+    head_sha: str
+    reviewer_id: str
+    decision: ReviewDecision
+    decided_at: datetime
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        for label, value in (("approval id", self.approval_id), ("publication id", self.publication_id), ("task id", self.task_id), ("session id", self.session_id), ("result id", self.result_id), ("reviewer id", self.reviewer_id)):
+            _phase8_identifier(value, label)
+        if not isinstance(self.approval_artifact, ArtifactRef):
+            raise ValidationError("approval artifact is invalid")
+        _phase8_sha(self.patch_digest, "patch digest", 64)
+        for label, value in (("base SHA", self.base_sha), ("tree SHA", self.tree_sha), ("head SHA", self.head_sha)):
+            _phase8_sha(value, label)
+        if not isinstance(self.decision, ReviewDecision) or not isinstance(self.decided_at, datetime) or self.schema_version != 1:
+            raise ValidationError("publication review decision is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "approval_id": self.approval_id, "publication_id": self.publication_id, "task_id": self.task_id, "session_id": self.session_id, "result_id": self.result_id, "approval_artifact_digest": self.approval_artifact.digest.value, "patch_digest": self.patch_digest, "base_sha": self.base_sha, "tree_sha": self.tree_sha, "head_sha": self.head_sha, "reviewer_id": self.reviewer_id, "decision": self.decision.value, "decided_at": self.decided_at.isoformat()}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PullRequestReceipt:
+    publication_id: str
+    pull_request_number: int
+    base_sha: str
+    tree_sha: str
+    head_sha: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        if not isinstance(self.pull_request_number, int) or isinstance(self.pull_request_number, bool) or self.pull_request_number <= 0:
+            raise ValidationError("pull request number is invalid")
+        for label, value in (("base SHA", self.base_sha), ("tree SHA", self.tree_sha), ("head SHA", self.head_sha)):
+            _phase8_sha(value, label)
+        if self.schema_version != 1:
+            raise ValidationError("pull request receipt is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "pull_request_number": self.pull_request_number, "base_sha": self.base_sha, "tree_sha": self.tree_sha, "head_sha": self.head_sha}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PublicationReceipt:
+    publication_id: str
+    effect_id: str
+    state: PublicationEffectState
+    pull_request: PullRequestReceipt | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_identifier(self.effect_id, "effect id")
+        if not isinstance(self.state, PublicationEffectState) or self.schema_version != 1:
+            raise ValidationError("publication receipt is invalid")
+        if self.pull_request is not None and (not isinstance(self.pull_request, PullRequestReceipt) or self.pull_request.publication_id != self.publication_id):
+            raise ValidationError("publication receipt pull request is invalid")
+        if self.state is PublicationEffectState.RECONCILED and self.pull_request is None:
+            raise ValidationError("reconciled publication receipt requires a pull request")
+        if self.state is PublicationEffectState.REQUESTED and self.pull_request is not None:
+            raise ValidationError("requested publication receipt cannot contain a pull request")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "effect_id": self.effect_id, "state": self.state.value, "pull_request": None if self.pull_request is None else self.pull_request.to_dict()}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class CheckRunObservation:
+    publication_id: str
+    head_sha: str
+    check_name: str
+    status: CheckRunStatus
+    conclusion: CheckRunConclusion | None
+    observed_at: datetime
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_sha(self.head_sha, "head SHA")
+        _phase8_identifier(self.check_name, "check name")
+        if not isinstance(self.status, CheckRunStatus) or (self.conclusion is not None and not isinstance(self.conclusion, CheckRunConclusion)) or not isinstance(self.observed_at, datetime) or self.schema_version != 1:
+            raise ValidationError("check run observation is invalid")
+        if self.status is CheckRunStatus.COMPLETED and self.conclusion is None:
+            raise ValidationError("completed check observation requires a conclusion")
+        if self.status is not CheckRunStatus.COMPLETED and self.conclusion is not None:
+            raise ValidationError("incomplete check observation cannot have a conclusion")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "head_sha": self.head_sha, "check_name": self.check_name, "status": self.status.value, "conclusion": None if self.conclusion is None else self.conclusion.value, "observed_at": self.observed_at.isoformat()}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class CheckGateResult:
+    publication_id: str
+    head_sha: str
+    required_checks: tuple[str, ...]
+    passed: bool
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_sha(self.head_sha, "head SHA")
+        if not isinstance(self.required_checks, tuple) or not isinstance(self.passed, bool) or self.schema_version != 1:
+            raise ValidationError("check gate result is invalid")
+        for check in self.required_checks:
+            _phase8_identifier(check, "required check")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "publication_id": self.publication_id, "head_sha": self.head_sha, "required_checks": list(self.required_checks), "passed": self.passed}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PublicationRecord:
+    intent: PublicationIntent
+    state: PublicationState = PublicationState.RESERVED
+    version: int = 0
+    prepared_head: PreparedHead | None = None
+    verification: VerificationResult | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.intent, PublicationIntent) or not isinstance(self.state, PublicationState) or self.version < 0:
+            raise ValidationError("publication record is invalid")
+        if self.prepared_head is not None and (not isinstance(self.prepared_head, PreparedHead) or self.prepared_head.publication_id != self.intent.publication_id):
+            raise ValidationError("publication prepared head is invalid")
+        if self.verification is not None and (not isinstance(self.verification, VerificationResult) or self.prepared_head is None or self.verification.head_sha != self.prepared_head.head_sha):
+            raise ValidationError("publication verification is invalid")
+
+
+@dataclass(frozen=True)
+class PublicationEffectIntent:
+    effect_id: str
+    publication_id: str
+    head_sha: str
+    deterministic_ref: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _phase8_identifier(self.effect_id, "effect id")
+        _phase8_identifier(self.publication_id, "publication id")
+        _phase8_sha(self.head_sha, "head SHA")
+        if self.deterministic_ref != f"refs/meta-loop/{self.publication_id}" or self.schema_version != 1:
+            raise ValidationError("publication effect intent is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": 1, "effect_id": self.effect_id, "publication_id": self.publication_id, "head_sha": self.head_sha, "deterministic_ref": self.deterministic_ref}
+
+    def canonical(self) -> str:
+        return _phase8_canonical(self.to_dict())
+
+
+@dataclass(frozen=True)
+class PublicationEffectRecord:
+    intent: PublicationEffectIntent
+    receipt: PublicationReceipt | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.intent, PublicationEffectIntent):
+            raise ValidationError("publication effect record is invalid")
+        if self.receipt is not None and (not isinstance(self.receipt, PublicationReceipt) or self.receipt.publication_id != self.intent.publication_id or self.receipt.effect_id != self.intent.effect_id):
+            raise ValidationError("publication effect receipt is invalid")
