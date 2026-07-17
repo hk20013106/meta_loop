@@ -97,5 +97,7 @@
   server. A configured label event by the configured trigger authority is the
   only intake trigger.
 - **Consequences:** Issue bodies are strict schema-v1 source artifacts; API
-  metadata supplies identity and trigger facts; missing configuration or
-  unverifiable source state fails closed.
+  metadata supplies identity and trigger facts; the newest matching label
+  event and a re-fetched Issue snapshot must agree before intake; missing
+  configuration, governance authorization, or unverifiable source state fails
+  closed.

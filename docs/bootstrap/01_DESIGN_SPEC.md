@@ -61,3 +61,23 @@ the opt-in adapter receives only an allowlisted repository and creates a
 detached worktree below one managed root. It rejects path/symlink escape and
 head drift. Planner/reviewer policies are read-only, R3 is proposal-only, and
 implementer access is governance-authorized or rejected.
+
+## Phase 7 GitHub Issue ingestion boundary
+
+Phase 7 is a bounded, read-only GitHub REST reconciliation flow for one
+explicitly configured repository, trigger actor and trigger label; it does not
+host a webhook. The HTTP adapter alone reads the PAT. It selects the latest
+matching label event, re-fetches the Issue to reject source drift, and requires
+an open non-PR Issue, matching actor/label and a verified lowercase 40-hex
+commit SHA. The fenced `meta-loop-json` schema-v1 object is parsed strictly and
+stored as a canonical CAS artifact.
+
+The source ledger reservation, Task, received/source/artifact events,
+ArtifactRef and queue row share one UoW. PostgreSQL locks source and trigger
+identities before reading or creating records; conflict, fuse, missing
+governance capability/revision, malformed provider data, or source drift fails
+closed before Task creation. CLI JSON success and failure results use a stable
+schema-v1 envelope and controlled messages without provider or database detail.
+
+Phase 7 excludes GitHub writes, webhook handling, PRs, CI, merge, Issue
+closure, real worker execution and all Phase 8+ behavior.

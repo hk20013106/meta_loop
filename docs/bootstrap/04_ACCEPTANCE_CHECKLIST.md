@@ -25,6 +25,10 @@
 [x] Phase 7 Issue contract is canonical, artifact-backed and idempotent
 [x] Phase 7 only ingests open Issues with an authorized GitHub label event
 [x] Phase 7 source ledger/task/event/catalog writes share a UoW
+[x] Phase 7 rejects source drift, duplicate trigger IDs, malformed REST data and engaged fuse states
+[x] Phase 7 binds the trigger actor and label through explicit configuration
+[x] Phase 7 CLI errors use stable redacted schema-v1 JSON envelopes
+[x] Phase 7 PostgreSQL lock/concurrency contracts pass in a fresh disposable database
 [ ] Workers cannot directly mutate task state
 [ ] Hermes sessions have isolated HOME and no shared memory
 [ ] Implementer cannot access GitHub PAT
@@ -34,7 +38,7 @@
 [ ] R3 tasks cannot enter automatic implementation
 [ ] R3 patch proposal is generated without applying it
 [ ] R0–R2 CI uses disposable containers
-[ ] GitHub Issue trigger validates Kai’s label event
+[x] GitHub Issue trigger validates the configured actor’s label event
 [ ] All artifacts are content-addressed with SHA-256
-[ ] Controller can reconcile GitHub state
+[x] Controller can reconcile GitHub Issue state through the read-only adapter
 [ ] Failed canary produces a controlled revert path

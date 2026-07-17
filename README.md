@@ -1,10 +1,10 @@
-# Meta Loop — Phase 0–6 Baseline
+# Meta Loop — Phase 0–7 Baseline
 
-This directory is the independent `meta_loop` system through **Phase 6**.
+This directory is the independent `meta_loop` system through **Phase 7**.
 It contains the Phase 0 boundary, the Phase 1 domain/persistence baseline,
-the local controller, CAS, fake runner/worker protocols, and managed Git
-worktree boundary. Phase 7+ GitHub and publication runtime behavior remains
-out of scope.
+the local controller, CAS, fake runner/worker protocols, managed Git worktree
+boundary, and GitHub REST Issue ingestion. Phase 8+ publication runtime
+behavior remains out of scope.
 
 ## Boundary model
 
@@ -33,22 +33,28 @@ governance_root/    # separate governance location (NOT created in Phase 0; see 
 5. An opt-in local Git worktree adapter with fixed-SHA, allowlist and
    read-only/R3 protections; its default contract adapter is deterministic and
    filesystem-free.
-6. A `.env.example` with explicit placeholders only (no real PAT / DSN / key).
-7. Boundary and disposable-database tests that prove:
+6. A read-only GitHub REST Issue reconciler for one explicitly configured
+   repository, trigger actor and trigger label. It accepts only verified,
+   open non-PR Issues with a pinned commit SHA, writes the canonical Issue
+   specification to CAS, and atomically records the source ledger, Task,
+   events, ArtifactRef and queue row.
+7. A `.env.example` with explicit placeholders only (no real PAT / DSN / key).
+8. Boundary and disposable-database tests that prove:
    - `meta_loop` imports without pulling in `research_loop`;
    - `meta_loop` is a sibling directory, not a child of `research_loop`;
    - `.env.example` contains no real secrets;
-   - no GitHub, PR, CI, merge or production runtime is present.
+   - no GitHub write, PR, CI, merge or production runtime is present.
 
-## Excluded capabilities (Phase 7+)
+## Excluded capabilities (Phase 8+)
 
-No GitHub Issue ingestion, PR publication, CI integration, auto-merge,
-governance-policy authoring, real Hermes execution, or production deployment
-is present.
+No GitHub PR publication, CI integration, auto-merge, governance-policy
+authoring, real Hermes execution, or production deployment is present. Phase 7
+does not host webhooks or contact real GitHub during acceptance.
 
 ## Configuration boundaries
 
-- **GitHub org / repo / identity**: placeholders only. No GitHub runtime is
-  implemented through Phase 6.
+- **GitHub repo / trigger actor / trigger label**: explicit local configuration
+  is required for Phase 7 reconciliation. The PAT is read only by the HTTP
+  infrastructure adapter and is never serialized.
 - **PostgreSQL DSN**: placeholder only; no real credentials.
 - **governance_root location**: separate boundary, not created in Phase 0.

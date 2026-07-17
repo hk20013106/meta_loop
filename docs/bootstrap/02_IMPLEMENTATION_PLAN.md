@@ -78,6 +78,25 @@ Stop conditions
 - **Non-goals:** GitHub, CI, remote branches, publication, merge, revert,
   real Hermes and real research execution.
 
+## Phase 7
+
+- **Goal:** Reconcile authorized GitHub Issues into canonical CAS-backed Tasks.
+- **Inputs:** Phase 2 fuse/CLI, Phase 3 CAS/catalog, Phase 1 UoW/queue, and
+  explicit repository, trigger-actor and trigger-label configuration.
+- **Files/modules:** strict Issue schema DTO/parser, source ledger ports and
+  `0007_phase7_issue_ingestion.sql`, GitHub REST read adapter, ingestion
+  service, CLI and fake/memory/PostgreSQL tests.
+- **Required behavior:** bounded REST parsing; latest matching event and
+  re-fetch source-drift protection; open/non-PR/actor/label/full-SHA checks;
+  CAS-before-UoW canonical artifact registration; transactional ledger/Task/
+  event/catalog/queue writes; source and trigger idempotency; fuse and explicit
+  governance fail-closed checks; stable redacted schema-v1 JSON output.
+- **Tests:** fake transport contracts, malformed/drift/idempotency tests,
+  PostgreSQL locking/concurrency tests and a fresh disposable PostgreSQL 16
+  full-suite gate.
+- **Non-goals:** webhook hosting, GitHub writes, pull requests, CI, merge,
+  Issue closure, real worker execution and Phase 8+ behavior.
+
 ## Phase 1A
 
 - **Goal:** Define and test the domain, state transitions, risk, events,
