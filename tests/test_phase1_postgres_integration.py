@@ -58,8 +58,13 @@ def migrated_database():
 def isolate_disposable_database():
     """The disposable test user is privileged; runtime adapters never truncate events."""
     with connection() as db, db.cursor() as cursor:
-        cursor.execute("TRUNCATE source_ingestions, workspace_allocations, task_events, task_queue, tasks CASCADE")
+        reset_disposable_database(cursor)
         db.commit()
+
+
+def reset_disposable_database(cursor):
+    cursor.execute("TRUNCATE source_ingestions, workspace_allocations, task_events, task_queue, tasks CASCADE")
+    cursor.execute("UPDATE system_fuse SET engaged = FALSE, changed_at = now(), governance_revision = NULL WHERE singleton = TRUE")
 
 
 def make_task() -> Task:
@@ -397,6 +402,16 @@ def test_committed_fuse_engage_blocks_interleaved_issue_ingestion(tmp_path):
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         assert set(executor.map(lambda fn: fn(), (engage, ingest))) == {None, "blocked"}
+
+
+def test_postgres_test_isolation_resets_fuse_state():
+    with connection() as db, db.cursor() as cursor:
+        cursor.execute("UPDATE system_fuse SET engaged = TRUE WHERE singleton = TRUE")
+        reset_disposable_database(cursor)
+        db.commit()
+
+    with PostgresUnitOfWork(connection) as uow:
+        assert not uow.fuse.get().engaged
 
 
 def test_postgres_workspace_ledger_rejects_another_active_task_purpose():
