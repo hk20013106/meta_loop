@@ -3,6 +3,10 @@
 from hashlib import sha256
 
 from meta_loop.application.models import (
+    CheckGateResult,
+    CheckRunConclusion,
+    CheckRunObservation,
+    CheckRunStatus,
     PreparedHead,
     PublicationEffectIntent,
     PublicationEffectState,
@@ -263,3 +267,84 @@ class PublicationPublishingService:
                 or pull_request.tree_sha != prepared.tree_sha
                 or pull_request.head_sha != prepared.head_sha):
             raise IdempotencyConflictError("remote publication receipt does not match the prepared head")
+
+
+class PublicationCheckService:
+    """Read current exact-head checks outside the UoW, then persist normalized observations."""
+
+    def __init__(self, uow_factory, check_source, required_checks: tuple[str, ...]) -> None:
+        if not isinstance(required_checks, tuple) or not required_checks or len(set(required_checks)) != len(required_checks):
+            raise ValidationError("required checks configuration is invalid")
+        try:
+            CheckGateResult("validation", "0" * 40, required_checks, False)
+        except ValidationError as error:
+            raise ValidationError("required checks configuration is invalid") from error
+        self._uow_factory = uow_factory
+        self._check_source = check_source
+        self._required_checks = required_checks
+
+    def check(self, publication_id: str, effect_id: str) -> CheckGateResult:
+        with self._uow_factory() as uow:
+            record, effect = self._validated_state(uow, publication_id, effect_id)
+            prepared = record.prepared_head
+            repository_name = record.intent.repository_name
+            head_sha = prepared.head_sha
+            effect_canonical = effect.intent.canonical()
+
+        observations = self._check_source.read(publication_id, repository_name, head_sha)
+        if not isinstance(observations, tuple):
+            raise ValidationError("GitHub check observations are invalid")
+        current: dict[str, CheckRunObservation] = {}
+        for observation in observations:
+            if (not isinstance(observation, CheckRunObservation)
+                    or observation.publication_id != publication_id
+                    or observation.head_sha != head_sha):
+                raise ValidationError("GitHub check observation head does not match publication head")
+            previous = current.get(observation.check_name)
+            if previous is not None and previous.observed_at == observation.observed_at:
+                raise ValidationError("GitHub check observation is ambiguous")
+            if previous is None or observation.observed_at > previous.observed_at:
+                current[observation.check_name] = observation
+
+        passed = all(
+            name in current
+            and current[name].status is CheckRunStatus.COMPLETED
+            and current[name].conclusion is CheckRunConclusion.SUCCESS
+            for name in self._required_checks
+        )
+
+        with self._uow_factory() as uow:
+            record, effect = self._validated_state(uow, publication_id, effect_id)
+            if record.prepared_head.head_sha != head_sha or effect.intent.canonical() != effect_canonical:
+                raise IdempotencyConflictError("publication changed while check observations were fetched")
+            for observation in observations:
+                uow.check_observations.append(observation)
+            uow.commit()
+
+        return CheckGateResult(publication_id, head_sha, self._required_checks, passed)
+
+    @staticmethod
+    def _validated_state(uow: UnitOfWork, publication_id: str, effect_id: str):
+        if uow.fuse.get().engaged:
+            raise ValidationError("publication checks are blocked by the fuse")
+        record = uow.publications.get(publication_id)
+        effect = uow.publication_effects.get(effect_id)
+        if (record is None or record.prepared_head is None or record.verification is None
+                or record.state is not PublicationState.VERIFIED
+                or record.verification.status is not VerificationStatus.SUCCEEDED
+                or record.verification.result_code is not VerificationResultCode.PASSED
+                or record.verification.head_sha != record.prepared_head.head_sha):
+            raise ValidationError("publication is not successfully verified")
+        receipt = None if effect is None else effect.receipt
+        pull_request = None if receipt is None else receipt.pull_request
+        if (effect is None or receipt is None or pull_request is None
+                or receipt.state is not PublicationEffectState.RECONCILED
+                or effect.intent.publication_id != publication_id
+                or effect.intent.head_sha != record.prepared_head.head_sha
+                or effect.intent.deterministic_ref != record.prepared_head.deterministic_ref
+                or receipt.publication_id != publication_id
+                or pull_request.head_sha != record.prepared_head.head_sha
+                or pull_request.tree_sha != record.prepared_head.tree_sha
+                or pull_request.base_sha != record.prepared_head.base_sha):
+            raise ValidationError("publication effect is not reconciled to the exact publication head")
+        return record, effect
