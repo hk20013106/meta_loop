@@ -13,7 +13,7 @@ from meta_loop.infrastructure.github import GitHubPublicationPublisher, UrllibJs
 from meta_loop.infrastructure.github_checks import GitHubCheckSource
 from meta_loop.infrastructure.memory import UUIDIdGenerator
 from meta_loop.infrastructure.migrations import MigrationRunner
-from meta_loop.infrastructure.postgres import PostgresUnitOfWork, psycopg_connection_factory
+from meta_loop.infrastructure.postgres import PostgresUnitOfWork
 from meta_loop.infrastructure.publication import DockerCandidateVerifier, LocalGitCandidatePreparer
 
 
@@ -33,7 +33,10 @@ def dsn() -> str:
 
 
 def unit_of_work() -> PostgresUnitOfWork:
-    return PostgresUnitOfWork(psycopg_connection_factory(dsn()))
+    def connect():
+        import psycopg
+        return psycopg.connect(dsn())
+    return PostgresUnitOfWork(connect)
 
 
 def cas_root() -> Path:
@@ -49,7 +52,14 @@ def github_ingestion_service() -> IssueIngestionService:
     if not revision:
         raise ValueError("META_LOOP_GOVERNANCE_REVISION is not configured")
     repository_root = Path(__file__).resolve().parents[3]
-    return IssueIngestionService(FilesystemArtifactStore(cas_root(), repository_root), UUIDIdGenerator(), UnavailableGovernance(), revision)
+    clock = __import__("meta_loop.cli.main", fromlist=["SystemClock"]).SystemClock()
+    return IssueIngestionService(
+        FilesystemArtifactStore(cas_root(), repository_root),
+        clock,
+        UUIDIdGenerator(),
+        UnavailableGovernance(),
+        revision,
+    )
 
 
 def _github_repository_name() -> str:
@@ -214,9 +224,9 @@ def doctor() -> dict[str, str]:
         result["database"] = "not configured"
     else:
         try:
-            factory = psycopg_connection_factory(value)
+            import psycopg
             runner = MigrationRunner.from_directory(Path(__file__).resolve().parents[3] / "migrations")
-            connection = factory()
+            connection = psycopg.connect(value)
             try:
                 runner.apply(connection)
                 result["database"] = "ok"
