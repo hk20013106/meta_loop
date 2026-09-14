@@ -4,7 +4,10 @@ from hashlib import sha256
 
 from meta_loop.application.models import (
     PreparedHead,
+    PublicationEffectIntent,
+    PublicationEffectState,
     PublicationIntent,
+    PublicationReceipt,
     PublicationReviewDecision,
     PublicationState,
     ReviewDecision,
@@ -169,3 +172,94 @@ class PublicationApprovalService:
             decided_at,
         )
         return uow.publication_approvals.append(decision)
+
+
+class PublicationPublishingService:
+    """Persist publish intent before remote I/O, then reconcile in a new transaction."""
+
+    def __init__(self, uow_factory, publisher) -> None:
+        self._uow_factory = uow_factory
+        self._publisher = publisher
+
+    def publish(self, publication_id: str, effect_id: str) -> PublicationReceipt:
+        with self._uow_factory() as uow:
+            if uow.fuse.get().engaged:
+                raise ValidationError("publication is blocked by the fuse")
+
+            record = uow.publications.get(publication_id)
+            if (record is None
+                    or record.state is not PublicationState.VERIFIED
+                    or record.prepared_head is None
+                    or record.verification is None
+                    or record.verification.status is not VerificationStatus.SUCCEEDED
+                    or record.verification.result_code is not VerificationResultCode.PASSED
+                    or record.verification.head_sha != record.prepared_head.head_sha):
+                raise ValidationError("publication is not successfully verified")
+
+            task = uow.tasks.get(record.intent.task_id)
+            prepared = record.prepared_head
+            if (task is None
+                    or task.status is not TaskStatus.READY_TO_PUBLISH
+                    or task.risk.effective is RiskClass.R3
+                    or task.repository.name != record.intent.repository_name
+                    or task.repository.revision != record.intent.base_sha
+                    or prepared.deterministic_ref != f"refs/heads/meta-loop/{publication_id}"):
+                raise ValidationError("publication task or branch is not eligible for publication")
+
+            approvals = uow.publication_approvals.read(publication_id, prepared.head_sha)
+            if not any(
+                approval.decision is ReviewDecision.APPROVED
+                and approval.task_id == record.intent.task_id
+                and approval.patch_digest == record.intent.patch_digest
+                and approval.base_sha == prepared.base_sha
+                and approval.tree_sha == prepared.tree_sha
+                and approval.head_sha == prepared.head_sha
+                for approval in approvals
+            ):
+                raise ValidationError("publication requires an exact-head approval")
+
+            effect_intent = PublicationEffectIntent(
+                effect_id,
+                publication_id,
+                prepared.head_sha,
+                prepared.deterministic_ref,
+            )
+            effect, _ = uow.publication_effects.request(effect_intent)
+            if effect.receipt is not None:
+                return effect.receipt
+
+            immutable_intent = record.intent
+            immutable_prepared = prepared
+            immutable_effect = effect.intent
+            uow.commit()
+
+        receipt = self._publisher.reconcile(immutable_intent, immutable_prepared, immutable_effect)
+        self._validate_receipt(receipt, immutable_prepared, immutable_effect)
+
+        with self._uow_factory() as uow:
+            current = uow.publication_effects.get(effect_id)
+            if current is None or current.intent.canonical() != immutable_effect.canonical():
+                raise IdempotencyConflictError("durable publication effect drifted before reconciliation")
+            if current.receipt is not None:
+                if current.receipt.canonical() != receipt.canonical():
+                    raise IdempotencyConflictError("publication effect has conflicting remote receipt")
+                return current.receipt
+            reconciled = uow.publication_effects.reconcile(receipt)
+            uow.commit()
+            if reconciled.receipt is None:
+                raise ValidationError("publication reconciliation did not persist a receipt")
+            return reconciled.receipt
+
+    @staticmethod
+    def _validate_receipt(receipt: PublicationReceipt, prepared: PreparedHead, effect: PublicationEffectIntent) -> None:
+        pull_request = receipt.pull_request
+        if (not isinstance(receipt, PublicationReceipt)
+                or receipt.publication_id != effect.publication_id
+                or receipt.effect_id != effect.effect_id
+                or receipt.state is not PublicationEffectState.RECONCILED
+                or pull_request is None
+                or pull_request.publication_id != effect.publication_id
+                or pull_request.base_sha != prepared.base_sha
+                or pull_request.tree_sha != prepared.tree_sha
+                or pull_request.head_sha != prepared.head_sha):
+            raise IdempotencyConflictError("remote publication receipt does not match the prepared head")
