@@ -45,13 +45,14 @@ class IntegrationMergeService:
 
         publication_intent, prepared, pull_request, task_version, event_sequence = immutable
         base_tree_sha = self._gateway.read_base_tree(publication_intent.repository_name, publication_intent.base_sha)
+        target_branch = self._gateway.target_branch(publication_intent.repository_name)
         intent = IntegrationIntent(
             integration_id,
             publication_id,
             effect_id,
             publication_intent.task_id,
             publication_intent.repository_name,
-            self._target_branch(publication_intent.repository_name, pull_request),
+            target_branch,
             pull_request.pull_request_number,
             publication_intent.base_sha,
             base_tree_sha,
@@ -136,15 +137,6 @@ class IntegrationMergeService:
             raise
         except Exception as error:
             raise ValidationError("merge governance is unavailable") from error
-
-    @staticmethod
-    def _target_branch(repository_name: str, pull_request) -> str:
-        # Phase 8 stores the base SHA, not branch name; Phase 9's gateway/config owns the target branch.
-        # The gateway exposes the configured branch without performing a write.
-        branch = getattr(pull_request, "target_branch", None)
-        if isinstance(branch, str) and branch:
-            return branch
-        return "main"
 
     @staticmethod
     def _validate_receipt(intent: IntegrationIntent, receipt: MergeReceipt) -> None:
