@@ -72,7 +72,7 @@ class LocalGitCandidatePreparer:
                 intent.base_sha,
                 tree_sha,
                 head_sha,
-                f"refs/meta-loop/{intent.publication_id}",
+                f"refs/heads/meta-loop/{intent.publication_id}",
             )
         finally:
             self._worktrees.release_owned(intent.repository_name, allocation_id)
@@ -297,7 +297,7 @@ class DockerCandidateVerifier:
         if (prepared.publication_id != intent.publication_id
                 or prepared.patch_digest != intent.patch_digest
                 or prepared.base_sha != intent.base_sha
-                or prepared.deterministic_ref != f"refs/meta-loop/{intent.publication_id}"):
+                or prepared.deterministic_ref != f"refs/heads/meta-loop/{intent.publication_id}"):
             raise ValidationError("verification head does not match publication intent")
 
     @staticmethod

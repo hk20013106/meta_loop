@@ -47,7 +47,7 @@ class Preparer:
 
     def prepare(self, intent: PublicationIntent, patch: bytes) -> PreparedHead:
         self.calls.append((intent, patch))
-        return PreparedHead(intent.publication_id, intent.patch_digest, intent.base_sha, TREE, HEAD, f"refs/meta-loop/{intent.publication_id}")
+        return PreparedHead(intent.publication_id, intent.patch_digest, intent.base_sha, TREE, HEAD, f"refs/heads/meta-loop/{intent.publication_id}")
 
 
 class Governance:

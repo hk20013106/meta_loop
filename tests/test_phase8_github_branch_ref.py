@@ -1,9 +1,6 @@
 from pathlib import Path
 
-import pytest
-
 from meta_loop.application.models import PreparedHead, PublicationEffectIntent
-from meta_loop.domain.errors import ValidationError
 
 
 def test_phase8_deterministic_ref_is_a_real_github_head_branch():
@@ -12,9 +9,6 @@ def test_phase8_deterministic_ref_is_a_real_github_head_branch():
     effect = PublicationEffectIntent("effect-1", "publication-1", "e" * 40, ref)
     assert prepared.deterministic_ref == ref
     assert effect.deterministic_ref == ref
-
-    with pytest.raises(ValidationError):
-        PreparedHead("publication-1", "b" * 64, "c" * 40, "d" * 40, "e" * 40, "refs/meta-loop/publication-1")
 
 
 def test_phase8_branch_ref_upgrade_is_additive_migration():

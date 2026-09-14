@@ -60,7 +60,7 @@ def test_local_candidate_preparer_is_deterministic_and_disposable(tmp_path: Path
     assert first.base_sha == base_sha
     assert len(first.tree_sha) == 40
     assert len(first.head_sha) == 40
-    assert first.deterministic_ref == "refs/meta-loop/publication-1"
+    assert first.deterministic_ref == "refs/heads/meta-loop/publication-1"
     assert run_git("status", "--porcelain", cwd=source) == ""
     assert not managed.exists() or not any(managed.iterdir())
 

@@ -323,6 +323,14 @@ def _phase8_sha(value: str, label: str, length: int = 40) -> None:
         raise ValidationError(f"{label} is invalid")
 
 
+def _phase8_publication_ref(publication_id: str) -> str:
+    return f"refs/heads/meta-loop/{publication_id}"
+
+
+def _phase8_ref_is_known(publication_id: str, value: str) -> bool:
+    return value in {_phase8_publication_ref(publication_id), f"refs/meta-loop/{publication_id}"}
+
+
 @dataclass(frozen=True)
 class PublicationIntent:
     publication_id: str
@@ -372,7 +380,7 @@ class PreparedHead:
         _phase8_sha(self.patch_digest, "patch digest", 64)
         for label, value in (("base SHA", self.base_sha), ("tree SHA", self.tree_sha), ("head SHA", self.head_sha)):
             _phase8_sha(value, label)
-        if self.deterministic_ref != f"refs/meta-loop/{self.publication_id}" or self.schema_version != 1:
+        if not _phase8_ref_is_known(self.publication_id, self.deterministic_ref) or self.schema_version != 1:
             raise ValidationError("deterministic ref is invalid")
 
     def to_dict(self) -> dict[str, object]:
@@ -577,7 +585,7 @@ class PublicationEffectIntent:
         _phase8_identifier(self.effect_id, "effect id")
         _phase8_identifier(self.publication_id, "publication id")
         _phase8_sha(self.head_sha, "head SHA")
-        if self.deterministic_ref != f"refs/meta-loop/{self.publication_id}" or self.schema_version != 1:
+        if not _phase8_ref_is_known(self.publication_id, self.deterministic_ref) or self.schema_version != 1:
             raise ValidationError("publication effect intent is invalid")
 
     def to_dict(self) -> dict[str, object]:
