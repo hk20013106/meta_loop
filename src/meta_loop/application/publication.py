@@ -2,11 +2,10 @@
 
 from hashlib import sha256
 
+from meta_loop.application.checks import RequiredCheckEvaluator, RequiredCheckStatus
 from meta_loop.application.models import (
     CheckGateResult,
-    CheckRunConclusion,
     CheckRunObservation,
-    CheckRunStatus,
     PreparedHead,
     PublicationEffectIntent,
     PublicationEffectState,
@@ -273,12 +272,7 @@ class PublicationCheckService:
     """Read current exact-head checks outside the UoW, then persist normalized observations."""
 
     def __init__(self, uow_factory, check_source, required_checks: tuple[str, ...]) -> None:
-        if not isinstance(required_checks, tuple) or not required_checks or len(set(required_checks)) != len(required_checks):
-            raise ValidationError("required checks configuration is invalid")
-        try:
-            CheckGateResult("validation", "0" * 40, required_checks, False)
-        except ValidationError as error:
-            raise ValidationError("required checks configuration is invalid") from error
+        self._evaluator = RequiredCheckEvaluator(required_checks)
         self._uow_factory = uow_factory
         self._check_source = check_source
         self._required_checks = required_checks
@@ -294,24 +288,10 @@ class PublicationCheckService:
         observations = self._check_source.read(publication_id, repository_name, head_sha)
         if not isinstance(observations, tuple):
             raise ValidationError("GitHub check observations are invalid")
-        current: dict[str, CheckRunObservation] = {}
         for observation in observations:
-            if (not isinstance(observation, CheckRunObservation)
-                    or observation.publication_id != publication_id
-                    or observation.head_sha != head_sha):
-                raise ValidationError("GitHub check observation head does not match publication head")
-            previous = current.get(observation.check_name)
-            if previous is not None and previous.observed_at == observation.observed_at:
-                raise ValidationError("GitHub check observation is ambiguous")
-            if previous is None or observation.observed_at > previous.observed_at:
-                current[observation.check_name] = observation
-
-        passed = all(
-            name in current
-            and current[name].status is CheckRunStatus.COMPLETED
-            and current[name].conclusion is CheckRunConclusion.SUCCESS
-            for name in self._required_checks
-        )
+            if not isinstance(observation, CheckRunObservation) or observation.publication_id != publication_id:
+                raise ValidationError("GitHub check observation does not match publication identity")
+        evaluation = self._evaluator.evaluate(observations, head_sha)
 
         with self._uow_factory() as uow:
             record, effect = self._validated_state(uow, publication_id, effect_id)
@@ -321,7 +301,12 @@ class PublicationCheckService:
                 uow.check_observations.append(observation)
             uow.commit()
 
-        return CheckGateResult(publication_id, head_sha, self._required_checks, passed)
+        return CheckGateResult(
+            publication_id,
+            head_sha,
+            self._required_checks,
+            evaluation.status is RequiredCheckStatus.PASSED,
+        )
 
     @staticmethod
     def _validated_state(uow: UnitOfWork, publication_id: str, effect_id: str):
