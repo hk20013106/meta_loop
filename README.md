@@ -79,8 +79,9 @@ are available.
 
 ## Repository hygiene and license
 
-No GitHub remote is configured by this repository. `.env` and local agent,
-TokenSave, build and packaging artifacts are excluded from version control.
+The repository is published privately at its configured GitHub `origin`.
+`.env` and local agent, TokenSave, build and packaging artifacts are excluded
+from version control.
 There is currently no `LICENSE` file: the repository is source-available only
 until its owner selects and adds a license; no open-source reuse grant is made.
 
