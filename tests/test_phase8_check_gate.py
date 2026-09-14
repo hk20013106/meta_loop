@@ -5,7 +5,7 @@ import pytest
 from meta_loop.application import models
 from meta_loop.application.publication import PublicationCheckService
 from meta_loop.domain.errors import ValidationError
-from meta_loop.infrastructure.github import GitHubCheckSource
+from meta_loop.infrastructure.github_checks import GitHubCheckSource
 from meta_loop.infrastructure.memory import InMemoryUnitOfWork
 
 
