@@ -9,7 +9,12 @@ from meta_loop.application.models import PublicationIntent, VerificationResultCo
 from meta_loop.application.publication import PublicationCheckService, PublicationPreparationService, PublicationPublishingService
 from meta_loop.domain.errors import UnsupportedGovernanceError, ValidationError
 from meta_loop.infrastructure.cas import FilesystemArtifactStore
-from meta_loop.infrastructure.github import GitHubPublicationPublisher, UrllibJsonTransport, github_issue_source_from_environment
+from meta_loop.infrastructure.github import (
+    GitHubPublicationPublisher,
+    UrllibJsonTransport,
+    github_issue_source_configured,
+    github_issue_source_from_environment,
+)
 from meta_loop.infrastructure.github_checks import GitHubCheckSource
 from meta_loop.infrastructure.memory import UUIDIdGenerator
 from meta_loop.infrastructure.migrations import MigrationRunner
@@ -40,7 +45,10 @@ def unit_of_work() -> PostgresUnitOfWork:
 
 
 def cas_root() -> Path:
-    return Path(os.environ.get("META_LOOP_CAS_ROOT", ".meta-loop/cas"))
+    value = os.environ.get("META_LOOP_CAS_ROOT")
+    if not value:
+        raise ValueError("META_LOOP_CAS_ROOT is not configured")
+    return Path(value)
 
 
 def github_issue_source():
@@ -217,23 +225,22 @@ def check_publication(publication_id: str):
     )
 
 
-def doctor() -> dict[str, str]:
-    result = {}
-    value = os.environ.get("META_LOOP_POSTGRES_DSN")
-    if not value:
-        result["database"] = "not configured"
-    else:
-        try:
-            import psycopg
-            runner = MigrationRunner.from_directory(Path(__file__).resolve().parents[3] / "migrations")
-            connection = psycopg.connect(value)
-            try:
-                runner.apply(connection)
-                result["database"] = "ok"
-            finally:
-                connection.close()
-        except Exception:
-            result["database"] = "unavailable"
-    result["cas"] = "configured" if os.environ.get("META_LOOP_CAS_ROOT") else "default"
-    result["governance"] = "unavailable"
+def doctor() -> dict[str, object]:
+    result: dict[str, object] = {
+        "database": "not configured",
+        "migrations": "not checked",
+        "governance": "unavailable",
+        "github": "configured" if github_issue_source_configured() else "not configured",
+    }
+    try:
+        import psycopg
+        with psycopg.connect(dsn()) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+            MigrationRunner.from_directory(Path(__file__).resolve().parents[3] / "migrations").validate_applied(tuple(row[0] for row in cursor.fetchall()))
+        result["database"] = "connected"
+        result["migrations"] = "valid"
+    except (ImportError, OSError, ValueError):
+        pass
+    root = os.environ.get("META_LOOP_CAS_ROOT")
+    result["cas"] = "not configured" if not root else ("healthy" if Path(root).is_dir() else "unavailable")
     return result
