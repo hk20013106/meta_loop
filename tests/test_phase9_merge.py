@@ -65,6 +65,10 @@ class MergeGateway:
         self.remote_merged = False
         self.merge_writes = 0
 
+    def target_branch(self, repository_name):
+        assert repository_name == "owner/repository"
+        return "main"
+
     def read_base_tree(self, repository_name, base_sha):
         assert not self.uow.open
         assert (repository_name, base_sha) == ("owner/repository", BASE)
