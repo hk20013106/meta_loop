@@ -44,7 +44,7 @@ class RequiredCheckEvaluator:
         current: dict[str, CheckRunObservation] = {}
         for observation in observations:
             if not isinstance(observation, CheckRunObservation) or observation.head_sha != exact_sha:
-                raise ValidationError("check observation SHA does not match exact subject SHA")
+                raise ValidationError("check observation head SHA does not match exact subject SHA")
             previous = current.get(observation.check_name)
             if previous is not None and previous.observed_at == observation.observed_at:
                 raise ValidationError("check observation is ambiguous")
