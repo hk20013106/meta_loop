@@ -70,11 +70,19 @@ def test_docker_verifier_rejects_unpinned_image_and_head_drift_before_docker(tmp
         prepared.publication_id, prepared.patch_digest, prepared.base_sha, prepared.tree_sha,
         "f" * 40, prepared.deterministic_ref,
     )
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    real_run = subprocess.run
+    docker_calls = []
+
+    def fake_run(args, *pargs, **kwargs):
+        if args and args[0] == "docker":
+            docker_calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0)
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(ValidationError, match="head"):
         verifier.verify(intent, drifted)
-    assert calls == []
+    assert docker_calls == []
 
 
 def test_docker_verifier_uses_required_security_flags_and_returns_controlled_failure(tmp_path: Path, monkeypatch):
@@ -88,7 +96,7 @@ def test_docker_verifier_uses_required_security_flags_and_returns_controlled_fai
     def fake_run(args, *pargs, **kwargs):
         if args and args[0] == "docker":
             docker_calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 9, stdout=b"unsafe output", stderr=b"secret-looking output")
+            return subprocess.CompletedProcess(args, 9)
         return real_run(args, *pargs, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -103,7 +111,8 @@ def test_docker_verifier_uses_required_security_flags_and_returns_controlled_fai
         assert required in joined
     assert "readonly" in joined
     assert kwargs["timeout"] == 7
-    assert kwargs["capture_output"] is True
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
     assert "META_LOOP_TEST_POSTGRES_DSN" not in kwargs.get("env", {})
 
 

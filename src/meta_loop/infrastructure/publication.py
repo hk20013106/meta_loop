@@ -1,12 +1,20 @@
-"""Fail-closed deterministic local preparation for Phase 8 publication candidates."""
+"""Fail-closed deterministic local preparation and verification for Phase 8."""
 
 from hashlib import sha256
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 
-from meta_loop.application.models import PreparedHead, PublicationIntent
+from meta_loop.application.models import (
+    PreparedHead,
+    PublicationIntent,
+    VerificationResult,
+    VerificationResultCode,
+    VerificationStatus,
+    VerifierProfile,
+)
 from meta_loop.domain.errors import ValidationError
 from meta_loop.infrastructure.workspaces import LocalGitWorkspaceManager
 
@@ -210,3 +218,128 @@ class LocalGitCandidatePreparer:
             return result.stdout.decode("ascii").strip()
         except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:
             raise ValidationError("candidate Git operation failed") from error
+
+
+class DockerCandidateVerifier:
+    """Verify an exact prepared head in a locked-down disposable Docker container."""
+
+    _PINNED_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}$")
+
+    def __init__(
+        self,
+        repositories: dict[str, Path],
+        managed_root: Path,
+        image: str,
+        argv: tuple[str, ...],
+        *,
+        timeout_seconds: int = 300,
+        user: str = "65534:65534",
+        memory: str = "256m",
+        cpus: str = "1.0",
+        pids_limit: int = 64,
+        forbidden_roots: tuple[Path, ...] = (),
+    ) -> None:
+        if not isinstance(image, str) or self._PINNED_IMAGE.fullmatch(image) is None:
+            raise ValidationError("verifier image must be pinned by sha256 digest")
+        if not isinstance(argv, tuple) or not argv or any(not isinstance(value, str) or not value or "\x00" in value for value in argv):
+            raise ValidationError("verifier argv must be a fixed non-empty tuple")
+        if not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 3600:
+            raise ValidationError("verifier timeout is invalid")
+        if user in {"0", "0:0", "root", "root:root"}:
+            raise ValidationError("verifier must run as non-root")
+        if not isinstance(pids_limit, int) or not 1 <= pids_limit <= 4096:
+            raise ValidationError("verifier PID limit is invalid")
+        self._worktrees = LocalGitWorkspaceManager(repositories, managed_root, forbidden_roots)
+        self._image = image
+        self._image_digest = image.split("@", 1)[1]
+        self._argv = argv
+        self._timeout_seconds = timeout_seconds
+        self._user = user
+        self._memory = memory
+        self._cpus = cpus
+        self._pids_limit = pids_limit
+
+    def verify(self, intent: PublicationIntent, prepared: PreparedHead) -> VerificationResult:
+        self._validate_binding(intent, prepared)
+        allocation_id = f"verify-{prepared.publication_id}"
+        try:
+            try:
+                destination = self._worktrees.checkout_owned(
+                    intent.repository_name, allocation_id, prepared.head_sha, read_only=True
+                )
+            except ValidationError as error:
+                raise ValidationError("verification head is not available") from error
+
+            self._validate_checkout(destination, prepared)
+            args = self._docker_arguments(destination)
+            try:
+                completed = subprocess.run(
+                    args,
+                    timeout=self._timeout_seconds,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=self._docker_environment(),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return self._result(prepared, VerificationResultCode.TIMEOUT)
+            except OSError:
+                return self._result(prepared, VerificationResultCode.BLOCKED)
+            return self._result(
+                prepared,
+                VerificationResultCode.PASSED if completed.returncode == 0 else VerificationResultCode.FAILED,
+            )
+        finally:
+            self._worktrees.release_owned(intent.repository_name, allocation_id)
+
+    @staticmethod
+    def _validate_binding(intent: PublicationIntent, prepared: PreparedHead) -> None:
+        if (prepared.publication_id != intent.publication_id
+                or prepared.patch_digest != intent.patch_digest
+                or prepared.base_sha != intent.base_sha
+                or prepared.deterministic_ref != f"refs/meta-loop/{intent.publication_id}"):
+            raise ValidationError("verification head does not match publication intent")
+
+    @staticmethod
+    def _validate_checkout(destination: Path, prepared: PreparedHead) -> None:
+        head = LocalGitCandidatePreparer._git(destination, "rev-parse", "HEAD")
+        tree = LocalGitCandidatePreparer._git(destination, "rev-parse", "HEAD^{tree}")
+        parent = LocalGitCandidatePreparer._git(destination, "rev-parse", "HEAD^")
+        if head != prepared.head_sha or tree != prepared.tree_sha or parent != prepared.base_sha:
+            raise ValidationError("verification head, tree, or base does not match prepared candidate")
+
+    def _docker_arguments(self, destination: Path) -> list[str]:
+        return [
+            "docker", "run",
+            "--rm",
+            "--network", "none",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--user", self._user,
+            "--pids-limit", str(self._pids_limit),
+            "--memory", self._memory,
+            "--cpus", self._cpus,
+            "--mount", f"type=bind,src={destination},dst=/workspace,readonly",
+            "--workdir", "/workspace",
+            self._image,
+            *self._argv,
+        ]
+
+    @staticmethod
+    def _docker_environment() -> dict[str, str]:
+        environment = {"PATH": os.environ.get("PATH", os.defpath)}
+        for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"):
+            if name in os.environ:
+                environment[name] = os.environ[name]
+        return environment
+
+    def _result(self, prepared: PreparedHead, code: VerificationResultCode) -> VerificationResult:
+        return VerificationResult(
+            prepared.publication_id,
+            prepared.head_sha,
+            self._image_digest,
+            VerifierProfile.DEFAULT,
+            VerificationStatus.SUCCEEDED if code is VerificationResultCode.PASSED else VerificationStatus.FAILED,
+            code,
+        )
