@@ -559,7 +559,7 @@ class PostgresPublicationApprovalStore:
 
     def read(self, publication_id: str, head_sha: str) -> tuple[PublicationReviewDecision, ...]:
         with self._connection.cursor() as cursor:
-            cursor.execute("SELECT decision_json, logical_name, media_type FROM publication_approvals JOIN artifact_catalog ON artifact_catalog.digest = publication_approvals.approval_artifact_digest WHERE publication_id = %s AND head_sha = %s ORDER BY created_at, approval_id", (publication_id, head_sha))
+            cursor.execute("SELECT decision_json, logical_name, media_type FROM publication_approvals JOIN artifact_catalog ON artifact_catalog.digest = publication_approvals.approval_artifact_digest WHERE publication_id = %s AND head_sha = %s ORDER BY publication_approvals.created_at, publication_approvals.approval_id", (publication_id, head_sha))
             return tuple(_decision_from_row(row) for row in cursor.fetchall())
 
 
