@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from meta_loop.application.ingestion import GitHubIssueIngestionService
+from meta_loop.application.ingestion import IssueIngestionService
 from meta_loop.application.models import PublicationIntent, VerificationResultCode, VerificationStatus
 from meta_loop.application.publication import PublicationCheckService, PublicationPreparationService, PublicationPublishingService
 from meta_loop.domain.errors import UnsupportedGovernanceError, ValidationError
@@ -44,12 +44,12 @@ def github_issue_source():
     return github_issue_source_from_environment()
 
 
-def github_ingestion_service() -> GitHubIssueIngestionService:
+def github_ingestion_service() -> IssueIngestionService:
     revision = os.environ.get("META_LOOP_GOVERNANCE_REVISION")
     if not revision:
         raise ValueError("META_LOOP_GOVERNANCE_REVISION is not configured")
     repository_root = Path(__file__).resolve().parents[3]
-    return GitHubIssueIngestionService(FilesystemArtifactStore(cas_root(), repository_root), UUIDIdGenerator(), UnavailableGovernance(), revision)
+    return IssueIngestionService(FilesystemArtifactStore(cas_root(), repository_root), UUIDIdGenerator(), UnavailableGovernance(), revision)
 
 
 def _github_repository_name() -> str:
