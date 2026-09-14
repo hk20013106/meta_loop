@@ -2,6 +2,7 @@ from dataclasses import replace
 
 from meta_loop.application.integration_models import CanaryResult, CanaryStatus, IntegrationIntent, IntegrationRecord, IntegrationState, MergeReceipt
 from meta_loop.domain.errors import IdempotencyConflictError, OptimisticConflictError, ValidationError
+from meta_loop.infrastructure.memory import InMemoryUnitOfWork
 
 
 _TERMINAL_TARGET_RELEASE_STATES = {IntegrationState.CANARY_PASSED, IntegrationState.REVERT_MERGED}
@@ -65,3 +66,27 @@ class InMemoryIntegrationLedger:
         updated = replace(current, state=state, version=current.version + 1, canary=result)
         self._records[result.integration_id] = updated
         return updated
+
+
+class Phase9InMemoryUnitOfWork(InMemoryUnitOfWork):
+    """Copy-on-write Phase 9 extension of the established in-memory UoW."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._integration_records: dict[str, IntegrationRecord] = {}
+        self.integrations = InMemoryIntegrationLedger(self._integration_records)
+
+    def __enter__(self):
+        super().__enter__()
+        self._working_integration_records = dict(self._integration_records)
+        self.integrations = InMemoryIntegrationLedger(self._working_integration_records)
+        return self
+
+    def commit(self) -> None:
+        super().commit()
+        self._integration_records = self._working_integration_records
+        self.integrations = InMemoryIntegrationLedger(self._integration_records)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        super().__exit__(exc_type, exc, tb)
+        self.integrations = InMemoryIntegrationLedger(self._integration_records)
