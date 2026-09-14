@@ -1,8 +1,17 @@
-"""Application gate for deterministic Phase 8 publication preparation."""
+"""Application gates for deterministic Phase 8 publication."""
 
 from hashlib import sha256
 
-from meta_loop.application.models import PreparedHead, PublicationIntent, PublicationState, RunnerSessionState
+from meta_loop.application.models import (
+    PreparedHead,
+    PublicationIntent,
+    PublicationReviewDecision,
+    PublicationState,
+    ReviewDecision,
+    RunnerSessionState,
+    VerificationResultCode,
+    VerificationStatus,
+)
 from meta_loop.application.ports import CandidatePreparer, ContentAddressedBlobStore, GovernanceReader, UnitOfWork
 from meta_loop.domain.enums import RiskClass, Role, TaskStatus
 from meta_loop.domain.errors import IdempotencyConflictError, TaskNotFoundError, UnsupportedGovernanceError, ValidationError
@@ -15,7 +24,7 @@ class PublicationPreparationService:
         self._governance = governance
 
     def prepare(self, uow: UnitOfWork, intent: PublicationIntent) -> PreparedHead:
-        task = self._validate_preconditions(uow, intent)
+        self._validate_preconditions(uow, intent)
         artifact = uow.artifacts.get(intent.patch_digest)
         result = uow.worker_results.get(intent.worker_result_id)
         if artifact is None or result is None:
@@ -89,3 +98,74 @@ class PublicationPreparationService:
             raise
         except Exception as error:
             raise UnsupportedGovernanceError("publication preparation governance is unavailable") from error
+
+
+class PublicationApprovalService:
+    """Bind one successful canonical PATCH_REVIEWER result to the exact verified head."""
+
+    def approve(
+        self,
+        uow: UnitOfWork,
+        publication_id: str,
+        approval_id: str,
+        reviewer_result_id: str,
+        approval_artifact_digest: str,
+        decided_at,
+    ) -> tuple[PublicationReviewDecision, bool]:
+        if uow.fuse.get().engaged:
+            raise ValidationError("publication approval is blocked by the fuse")
+
+        record = uow.publications.get(publication_id)
+        if (record is None
+                or record.state is not PublicationState.VERIFIED
+                or record.prepared_head is None
+                or record.verification is None
+                or record.verification.status is not VerificationStatus.SUCCEEDED
+                or record.verification.result_code is not VerificationResultCode.PASSED
+                or record.verification.head_sha != record.prepared_head.head_sha):
+            raise ValidationError("publication is not successfully verified")
+
+        task = uow.tasks.get(record.intent.task_id)
+        if (task is None
+                or task.status is not TaskStatus.READY_TO_PUBLISH
+                or task.risk.effective is RiskClass.R3
+                or task.repository.name != record.intent.repository_name
+                or task.repository.revision != record.intent.base_sha):
+            raise ValidationError("publication task is not eligible for approval")
+
+        result = uow.worker_results.get(reviewer_result_id)
+        session = None if result is None else uow.runner_sessions.get(result.session_id)
+        patch_artifact = uow.artifacts.get(record.intent.patch_digest)
+        if (result is None or session is None or patch_artifact is None
+                or result.task_id != record.intent.task_id
+                or result.worker.role is not Role.PATCH_REVIEWER
+                or result.target is not TaskStatus.READY_TO_PUBLISH
+                or session.request.task_id != record.intent.task_id
+                or session.request.role is not Role.PATCH_REVIEWER
+                or session.state is not RunnerSessionState.SUCCEEDED
+                or result.session_id != session.request.session_id
+                or patch_artifact.reference not in session.request.input_artifacts):
+            raise ValidationError("publication reviewer result is not a successful canonical PATCH_REVIEWER result")
+
+        approval_artifact = uow.artifacts.get(approval_artifact_digest)
+        if (approval_artifact is None
+                or approval_artifact.source_kind != f"worker_result:{reviewer_result_id}"):
+            raise ValidationError("publication approval artifact is not owned by the reviewer result")
+
+        prepared = record.prepared_head
+        decision = PublicationReviewDecision(
+            approval_id,
+            publication_id,
+            record.intent.task_id,
+            result.session_id,
+            result.result_id,
+            approval_artifact.reference,
+            record.intent.patch_digest,
+            prepared.base_sha,
+            prepared.tree_sha,
+            prepared.head_sha,
+            result.worker.worker_id,
+            ReviewDecision.APPROVED,
+            decided_at,
+        )
+        return uow.publication_approvals.append(decision)
