@@ -60,7 +60,7 @@ class FakePublisher:
         )
 
 
-def seed_approved(uow: InMemoryUnitOfWork) -> None:
+def seed_publication(uow: InMemoryUnitOfWork, *, approved: bool = True) -> None:
     initial = Task.create(
         "task-1",
         TaskSource("synthetic", "fixture"),
@@ -108,17 +108,18 @@ def seed_approved(uow: InMemoryUnitOfWork) -> None:
         "review-result", "review-session", "task-1", models.WorkerIdentity("reviewer-1", Role.PATCH_REVIEWER),
         TaskStatus.READY_TO_PUBLISH, "approved", 1, 0,
     ))
-    uow.publication_approvals.append(models.PublicationReviewDecision(
-        "approval-1", "publication-1", "task-1", "review-session", "review-result", REVIEW,
-        PATCH.digest.value, prepared.base_sha, prepared.tree_sha, prepared.head_sha,
-        "reviewer-1", models.ReviewDecision.APPROVED, NOW,
-    ))
+    if approved:
+        uow.publication_approvals.append(models.PublicationReviewDecision(
+            "approval-1", "publication-1", "task-1", "review-session", "review-result", REVIEW,
+            PATCH.digest.value, prepared.base_sha, prepared.tree_sha, prepared.head_sha,
+            "reviewer-1", models.ReviewDecision.APPROVED, NOW,
+        ))
 
 
-def ready_uow() -> TrackingUow:
+def ready_uow(*, approved: bool = True) -> TrackingUow:
     uow = TrackingUow()
     with uow:
-        seed_approved(uow)
+        seed_publication(uow, approved=approved)
         uow.commit()
     return uow
 
@@ -167,11 +168,8 @@ def test_publish_is_idempotent_after_reconciliation_and_does_not_call_network_ag
 
 
 def test_publish_blocks_before_effect_or_network_without_exact_head_approval_or_with_fuse():
-    uow = ready_uow()
+    uow = ready_uow(approved=False)
     publisher = FakePublisher(uow)
-    with uow:
-        uow._publication_approvals.clear()
-        uow.commit()
     with pytest.raises(ValidationError, match="approval"):
         PublicationPublishingService(lambda: uow, publisher).publish("publication-1", "effect-1")
     assert publisher.calls == []
