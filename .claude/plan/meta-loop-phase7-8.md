@@ -10,7 +10,7 @@
 
 ## Baseline facts and non-negotiable gates
 
-- Work only in `D:\research_loop\meta_loop`; do not import, initialize, or modify `D:\research_loop\research_loop` or `governance_root`.
+- Work only in this repository; do not import, initialize, or modify an external `research_loop` checkout or `governance_root`.
 - Preserve `HANDOFF.md`; it is ignored by `.git/info/exclude` and must not be deleted or staged.
 - `master@0613617` already contains `08a790d feat: add managed Git worktrees` after the Phase 2–5 baseline `a2527d8`. Phase 6 integration and `docs/reports/PHASE6_INTEGRATION_REPORT.md` already exist; do not repeat them.
 - `feat/phase7-phase8@07041a7` contains Phase 7 but is not yet in `master`.

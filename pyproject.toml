@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "meta-loop"
 version = "0.0.0"
-description = "Independent Meta Loop bootstrap scaffold"
+description = "Independent, fail-closed maintenance orchestration system"
+readme = "README.md"
 requires-python = ">=3.11"
 
 [project.scripts]

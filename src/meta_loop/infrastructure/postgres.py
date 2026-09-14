@@ -439,8 +439,10 @@ class PostgresPublicationLedger:
         return PublicationRecord(intent, PublicationState(row[5]), row[6], prepared, verification)
 
     def _references_are_valid(self, cursor, intent: PublicationIntent) -> bool:
-        cursor.execute("SELECT task_json FROM tasks WHERE task_id = %s", (intent.task_id,))
+        cursor.execute("SELECT task_json FROM tasks WHERE task_id = %s FOR UPDATE", (intent.task_id,))
         task_row = cursor.fetchone()
+        cursor.execute("SELECT count(*) FROM task_events WHERE task_id = %s", (intent.task_id,))
+        event_count = cursor.fetchone()[0]
         cursor.execute("SELECT task_id, session_id, result_json FROM worker_results WHERE result_id = %s", (intent.worker_result_id,))
         result_row = cursor.fetchone()
         cursor.execute("SELECT media_type, source_kind FROM artifact_catalog WHERE digest = %s", (intent.patch_digest,))
@@ -452,7 +454,7 @@ class PostgresPublicationLedger:
         session = cursor.fetchone()
         worker = _phase8_json(result_row[2])
         patch_digests = {artifact.digest.value for artifact in task.artifacts}
-        return task.repository.name == intent.repository_name and task.status is TaskStatus.READY_TO_PUBLISH and task.version == intent.expected_task_version and intent.patch_digest in patch_digests and session is not None and session[0] == intent.task_id and session[1] == Role.IMPLEMENTER.value and session[2] == RunnerSessionState.SUCCEEDED.value and worker.get("role") == Role.IMPLEMENTER.value
+        return task.repository.name == intent.repository_name and task.status is TaskStatus.READY_TO_PUBLISH and task.version == intent.expected_task_version and event_count == intent.expected_sequence and intent.patch_digest in patch_digests and session is not None and session[0] == intent.task_id and session[1] == Role.IMPLEMENTER.value and session[2] == RunnerSessionState.SUCCEEDED.value and worker.get("role") == Role.IMPLEMENTER.value
 
     def reserve(self, intent: PublicationIntent) -> tuple[PublicationRecord, bool]:
         with self._connection.cursor() as cursor:
@@ -465,7 +467,16 @@ class PostgresPublicationLedger:
                 return record, False
             if not self._references_are_valid(cursor, intent):
                 raise ValidationError("publication references are invalid")
-            cursor.execute("INSERT INTO publications (publication_id, task_id, worker_result_id, patch_digest, repository_name, base_sha, canonical_input, state, version, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'reserved', 0, 1)", (intent.publication_id, intent.task_id, intent.worker_result_id, intent.patch_digest, intent.repository_name, intent.base_sha, intent.canonical()))
+            cursor.execute("INSERT INTO publications (publication_id, task_id, worker_result_id, patch_digest, repository_name, base_sha, canonical_input, state, version, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'reserved', 0, 1) ON CONFLICT (publication_id) DO NOTHING", (intent.publication_id, intent.task_id, intent.worker_result_id, intent.patch_digest, intent.repository_name, intent.base_sha, intent.canonical()))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT canonical_input, tree_sha, head_sha, deterministic_ref, verification_json, state, version FROM publications WHERE publication_id = %s FOR UPDATE", (intent.publication_id,))
+                concurrent = cursor.fetchone()
+                if concurrent is None:
+                    raise IdempotencyConflictError("publication id conflicts with a concurrent reservation")
+                record = self._record(concurrent)
+                if record.intent.canonical() != intent.canonical():
+                    raise IdempotencyConflictError("publication id has conflicting canonical input")
+                return record, False
         return PublicationRecord(intent), True
 
     def get(self, publication_id: str) -> PublicationRecord | None:
@@ -534,7 +545,16 @@ class PostgresPublicationApprovalStore:
             worker = None if result is None else _phase8_json(result[2])
             if publication is None or artifact is None or session is None or result is None or verification is None or publication[5] != PublicationState.VERIFIED.value or verification.get("status") != VerificationStatus.SUCCEEDED.value or publication[0] != decision.task_id or publication[1] != decision.patch_digest or publication[2] != decision.base_sha or publication[3] != decision.tree_sha or publication[4] != decision.head_sha or session[0] != decision.task_id or session[1] != Role.PATCH_REVIEWER.value or session[2] != RunnerSessionState.SUCCEEDED.value or result[0] != decision.task_id or result[1] != decision.session_id or worker.get("role") != Role.PATCH_REVIEWER.value or worker.get("worker_id") != decision.reviewer_id:
                 raise IdempotencyConflictError("approval does not match exact publication head")
-            cursor.execute("INSERT INTO publication_approvals (approval_id, publication_id, task_id, session_id, result_id, approval_artifact_digest, patch_digest, base_sha, tree_sha, head_sha, reviewer_id, decision, decided_at, decision_json, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 1)", (decision.approval_id, decision.publication_id, decision.task_id, decision.session_id, decision.result_id, decision.approval_artifact.digest.value, decision.patch_digest, decision.base_sha, decision.tree_sha, decision.head_sha, decision.reviewer_id, decision.decision.value, decision.decided_at, decision.canonical()))
+            cursor.execute("INSERT INTO publication_approvals (approval_id, publication_id, task_id, session_id, result_id, approval_artifact_digest, patch_digest, base_sha, tree_sha, head_sha, reviewer_id, decision, decided_at, decision_json, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 1) ON CONFLICT (approval_id) DO NOTHING", (decision.approval_id, decision.publication_id, decision.task_id, decision.session_id, decision.result_id, decision.approval_artifact.digest.value, decision.patch_digest, decision.base_sha, decision.tree_sha, decision.head_sha, decision.reviewer_id, decision.decision.value, decision.decided_at, decision.canonical()))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT decision_json, logical_name, media_type FROM publication_approvals JOIN artifact_catalog ON artifact_catalog.digest = publication_approvals.approval_artifact_digest WHERE approval_id = %s FOR UPDATE", (decision.approval_id,))
+                concurrent = cursor.fetchone()
+                if concurrent is None:
+                    raise IdempotencyConflictError("approval id conflicts with a concurrent append")
+                prior = _decision_from_row(concurrent)
+                if prior.canonical() != decision.canonical():
+                    raise IdempotencyConflictError("approval id has conflicting content")
+                return prior, False
         return decision, True
 
     def read(self, publication_id: str, head_sha: str) -> tuple[PublicationReviewDecision, ...]:
@@ -585,7 +605,16 @@ class PostgresPublicationEffectStore:
                 raise IdempotencyConflictError("publication deterministic ref already has an effect intent")
             if publication is None or approval is None or verification is None or publication[0] != intent.head_sha or publication[1] != intent.deterministic_ref or publication[2] != PublicationState.VERIFIED.value or verification.get("status") != VerificationStatus.SUCCEEDED.value:
                 raise IdempotencyConflictError("publication effect does not match exact publication head")
-            cursor.execute("INSERT INTO publication_effects (effect_id, publication_id, head_sha, deterministic_ref, intent_json, state, schema_version) VALUES (%s, %s, %s, %s, %s::jsonb, 'requested', 1)", (intent.effect_id, intent.publication_id, intent.head_sha, intent.deterministic_ref, intent.canonical()))
+            cursor.execute("INSERT INTO publication_effects (effect_id, publication_id, head_sha, deterministic_ref, intent_json, state, schema_version) VALUES (%s, %s, %s, %s, %s::jsonb, 'requested', 1) ON CONFLICT DO NOTHING", (intent.effect_id, intent.publication_id, intent.head_sha, intent.deterministic_ref, intent.canonical()))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT intent_json, receipt_json FROM publication_effects WHERE effect_id = %s FOR UPDATE", (intent.effect_id,))
+                concurrent = cursor.fetchone()
+                if concurrent is None:
+                    raise IdempotencyConflictError("publication deterministic ref already has an effect intent")
+                record = self._record(concurrent)
+                if record.intent.canonical() != intent.canonical():
+                    raise IdempotencyConflictError("publication effect id has conflicting input")
+                return record, False
         return PublicationEffectRecord(intent), True
 
     def get(self, effect_id: str) -> PublicationEffectRecord | None:
@@ -635,7 +664,15 @@ class PostgresCheckRunObservationStore:
             publication = cursor.fetchone()
             if publication is None or publication[0] != observation.head_sha:
                 raise IdempotencyConflictError("check observation does not match exact publication head")
-            cursor.execute("INSERT INTO check_run_observations (publication_id, head_sha, check_name, status, conclusion, observed_at, observation_json, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 1)", (observation.publication_id, observation.head_sha, observation.check_name, observation.status.value, None if observation.conclusion is None else observation.conclusion.value, observation.observed_at, observation.canonical()))
+            cursor.execute("INSERT INTO check_run_observations (publication_id, head_sha, check_name, status, conclusion, observed_at, observation_json, schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 1) ON CONFLICT (publication_id, head_sha, check_name, observed_at) DO NOTHING", (observation.publication_id, observation.head_sha, observation.check_name, observation.status.value, None if observation.conclusion is None else observation.conclusion.value, observation.observed_at, observation.canonical()))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT observation_json FROM check_run_observations WHERE publication_id = %s AND head_sha = %s AND check_name = %s AND observed_at = %s FOR UPDATE", (observation.publication_id, observation.head_sha, observation.check_name, observation.observed_at))
+                concurrent = cursor.fetchone()
+                if concurrent is None:
+                    raise IdempotencyConflictError("check observation conflicts with a concurrent append")
+                if _canonical(_phase8_json(concurrent[0])) != observation.canonical():
+                    raise IdempotencyConflictError("check observation has conflicting content")
+                return observation, False
         return observation, True
 
     def read(self, publication_id: str, head_sha: str) -> tuple[CheckRunObservation, ...]:

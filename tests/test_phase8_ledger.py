@@ -57,7 +57,7 @@ def test_phase8_contracts_are_canonical_and_reject_unsafe_identifiers():
 def _intent() -> models.PublicationIntent:
     return models.PublicationIntent(
         "publication-1", "task-1", "result-1", "b" * 64, "owner/repository", "c" * 40,
-        1, 7, "correlation-1", "governance-1",
+        1, 0, "correlation-1", "governance-1",
     )
 
 

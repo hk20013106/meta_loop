@@ -1,7 +1,16 @@
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.py[cod]
+.coverage
+htmlcov/
 .env
+.venv/
 build/
+dist/
 *.egg-info/
 .tokensave
+.claude/settings.local.json
+.claude/plan/phase8-batch1-review-and-gate.md
+HANDOFF.md

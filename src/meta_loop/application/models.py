@@ -340,7 +340,10 @@ class PublicationIntent:
     def __post_init__(self) -> None:
         for label, value in (("publication id", self.publication_id), ("task id", self.task_id), ("worker result id", self.worker_result_id), ("correlation id", self.correlation_id), ("governance revision", self.governance_revision)):
             _phase8_identifier(value, label)
-        if not isinstance(self.repository_name, str) or len(self.repository_name) > 128 or self.repository_name.count("/") != 1 or ".." in self.repository_name or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/" for character in self.repository_name):
+        if not isinstance(self.repository_name, str) or len(self.repository_name) > 128:
+            raise ValidationError("repository name is invalid")
+        repository_parts = self.repository_name.split("/")
+        if len(repository_parts) != 2 or any(not part or ".." in part or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in part) for part in repository_parts):
             raise ValidationError("repository name is invalid")
         _phase8_sha(self.patch_digest, "patch digest", 64)
         _phase8_sha(self.base_sha, "base SHA")

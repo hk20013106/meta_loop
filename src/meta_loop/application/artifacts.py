@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from meta_loop.application.models import CatalogedArtifact
 from meta_loop.application.ports import IdGenerator, UnitOfWork
-from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef
+from meta_loop.domain.artifacts import ArtifactDigest, ArtifactRef, validate_logical_name
 from meta_loop.domain.enums import EventType, Role
 from meta_loop.domain.errors import TaskNotFoundError, ValidationError
 from meta_loop.domain.events import Event
@@ -17,6 +17,9 @@ class ArtifactRequest:
     classification: str
     source_kind: str
     contains_secrets: bool = False
+
+    def __post_init__(self) -> None:
+        validate_logical_name(self.logical_name)
 
 
 class ArtifactRegistrationService:

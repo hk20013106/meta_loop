@@ -307,9 +307,10 @@ class InMemoryWorkspaceLedger:
 
 
 class InMemoryPublicationLedger:
-    def __init__(self, records: dict[str, PublicationRecord], tasks: dict[str, Task], artifacts: dict[str, CatalogedArtifact], worker_results: dict[str, WorkerResult], runner_sessions: dict[str, RunnerSessionRecord]) -> None:
+    def __init__(self, records: dict[str, PublicationRecord], tasks: dict[str, Task], events: dict[str, list[Event]], artifacts: dict[str, CatalogedArtifact], worker_results: dict[str, WorkerResult], runner_sessions: dict[str, RunnerSessionRecord]) -> None:
         self._records = records
         self._tasks = tasks
+        self._events = events
         self._artifacts = artifacts
         self._worker_results = worker_results
         self._runner_sessions = runner_sessions
@@ -319,7 +320,7 @@ class InMemoryPublicationLedger:
         artifact = self._artifacts.get(intent.patch_digest)
         result = self._worker_results.get(intent.worker_result_id)
         session = None if result is None else self._runner_sessions.get(result.session_id)
-        if task is None or task.repository.name != intent.repository_name or task.status.value != "ready_to_publish" or task.version != intent.expected_task_version:
+        if task is None or task.repository.name != intent.repository_name or task.status.value != "ready_to_publish" or task.version != intent.expected_task_version or len(self._events.get(intent.task_id, ())) != intent.expected_sequence:
             raise ValidationError("publication task reference is invalid")
         if artifact is None or artifact.reference not in task.artifacts or artifact.reference.media_type != "text/x-diff" or artifact.source_kind != f"worker_result:{intent.worker_result_id}":
             raise ValidationError("publication patch artifact reference is invalid")
@@ -501,7 +502,7 @@ class InMemoryUnitOfWork:
         self.runner_sessions = InMemoryRunnerSessionStore(runner_sessions)
         self.worker_results = InMemoryWorkerResultLedger(worker_results)
         self.workspaces = InMemoryWorkspaceLedger(workspaces)
-        self.publications = InMemoryPublicationLedger(publications, tasks, artifacts, worker_results, runner_sessions)
+        self.publications = InMemoryPublicationLedger(publications, tasks, events, artifacts, worker_results, runner_sessions)
         self.publication_approvals = InMemoryPublicationApprovalStore(publication_approvals, publications, artifacts, runner_sessions, worker_results)
         self.publication_effects = InMemoryPublicationEffectStore(publication_effects, publications, publication_approvals)
         self.check_observations = InMemoryCheckRunObservationStore(check_observations, publications)

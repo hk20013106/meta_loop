@@ -1,25 +1,21 @@
-"""Phase 0 boundary test: proves meta_loop is an independent, auditable
-bootstrap scaffold and does NOT couple to research_loop internals.
+"""Package-boundary tests for an independently clonable ``meta_loop`` repo.
 
-This test exercises the real package boundary (import isolation, directory
-placement, placeholder-only config) rather than mocking internals.
+They prove import isolation and placeholder-only configuration without
+requiring a separately checked-out ``research_loop`` sibling.
 """
 import re
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # D:/research_loop
-META_LOOP_DIR = REPO_ROOT / "meta_loop"
-RESEARCH_LOOP_DIR = REPO_ROOT / "research_loop"
-PACKAGE_INIT = META_LOOP_DIR / "src" / "meta_loop" / "__init__.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_INIT = REPO_ROOT / "src" / "meta_loop" / "__init__.py"
 
 
 def test_meta_loop_package_present_and_versioned():
     import meta_loop
 
     assert meta_loop.__version__ == "0.0.0"
-    assert meta_loop.__phase__ == "0"
 
 
 def test_meta_loop_imports_without_research_loop_coupling():
@@ -33,16 +29,15 @@ def test_meta_loop_imports_without_research_loop_coupling():
     )
 
 
-def test_meta_loop_is_separate_from_research_loop_dir():
-    # meta_loop must be a sibling of research_loop, never a child of it.
-    assert META_LOOP_DIR.exists()
-    assert RESEARCH_LOOP_DIR.exists()
-    assert META_LOOP_DIR.parent == RESEARCH_LOOP_DIR.parent == REPO_ROOT
-    assert not str(META_LOOP_DIR).startswith(str(RESEARCH_LOOP_DIR))
+def test_repository_boundary_needs_no_research_loop_checkout():
+    # A published Meta Loop clone must remain usable when research_loop is absent.
+    assert (REPO_ROOT / "pyproject.toml").exists()
+    assert PACKAGE_INIT.exists()
+    assert not (REPO_ROOT / "src" / "research_loop").exists()
 
 
 def test_env_example_has_no_real_secrets():
-    env_example = META_LOOP_DIR / ".env.example"
+    env_example = REPO_ROOT / ".env.example"
     assert env_example.exists()
     text = env_example.read_text(encoding="utf-8")
     # No assignment may contain a real-looking GitHub PAT.
