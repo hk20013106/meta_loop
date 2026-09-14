@@ -20,33 +20,36 @@ class LocalGitWorkspaceManager:
             raise ValidationError("managed workspace root intersects a forbidden boundary")
 
     def allocate(self, request: WorkspaceRequest, repository, read_only: bool) -> WorkspaceRecord:
-        source = self._repositories.get(repository.name)
-        if source is None or not (source / ".git").exists() or any(self._within(source, root) for root in self._forbidden_roots):
-            raise ValidationError("workspace repository is not an allowed local Git root")
+        self.checkout_owned(repository.name, request.allocation_id, request.source_revision, read_only=read_only)
+        return WorkspaceRecord(request, read_only, repository.name)
+
+    def checkout_owned(self, repository_name: str, allocation_id: str, revision: str, read_only: bool = False) -> Path:
+        source = self._repository(repository_name, "workspace repository is not an allowed local Git root")
         self._managed_root.mkdir(parents=True, exist_ok=True)
-        destination = self._destination(request.allocation_id)
-        revision = self._git(source, "rev-parse", "--verify", f"{request.source_revision}^{{commit}}")
-        if revision != request.source_revision:
+        destination = self._destination(allocation_id)
+        verified = self._git(source, "rev-parse", "--verify", f"{revision}^{{commit}}")
+        if verified != revision:
             raise ValidationError("workspace source revision does not match the verified commit")
         if destination.exists():
             head = self._git(destination, "rev-parse", "HEAD")
-            if head != request.source_revision:
+            if head != revision:
                 raise IdempotencyConflictError("managed workspace has conflicting head revision")
             if read_only:
                 self._set_read_only(destination)
-            return WorkspaceRecord(request, read_only, repository.name)
-        self._git(source, "worktree", "add", "--detach", str(destination), request.source_revision)
+            return destination
+        self._git(source, "worktree", "add", "--detach", str(destination), revision)
         if read_only:
             self._set_read_only(destination)
-        return WorkspaceRecord(request, read_only, repository.name)
+        return destination
 
     def release(self, record: WorkspaceRecord) -> bool:
-        destination = self._destination(record.workspace_id)
+        return self.release_owned(record.repository_name, record.workspace_id)
+
+    def release_owned(self, repository_name: str, allocation_id: str) -> bool:
+        destination = self._destination(allocation_id)
         if not destination.exists():
             return False
-        source = self._repositories.get(record.repository_name)
-        if source is None:
-            raise ValidationError("workspace repository configuration is unavailable")
+        source = self._repository(repository_name, "workspace repository configuration is unavailable")
         self._set_writable(destination)
         try:
             self._git(source, "worktree", "remove", "--force", "--force", str(destination))
@@ -56,6 +59,12 @@ class LocalGitWorkspaceManager:
             shutil.rmtree(destination)
             self._git(source, "worktree", "prune")
         return True
+
+    def _repository(self, repository_name: str, message: str) -> Path:
+        source = self._repositories.get(repository_name)
+        if source is None or not (source / ".git").exists() or any(self._within(source, root) for root in self._forbidden_roots):
+            raise ValidationError(message)
+        return source
 
     def _destination(self, allocation_id: str) -> Path:
         if not allocation_id or any(character in allocation_id for character in "/\\") or allocation_id in (".", ".."):
